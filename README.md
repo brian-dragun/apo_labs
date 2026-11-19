@@ -330,15 +330,18 @@ Labs run in order — each builds on the previous. Attend the lecture module bef
 
 ## Restoring a lab to the original code
 
-`backup_labs/` holds an untouched copy of `lab1/`, `lab2/`, `lab3/` and `shared/` exactly as the
-instructor published them. If you break a starter file, reset it with `restore-lab.sh`:
+The instructor's original code lives in git, not in a copy folder. The tag `workshop-original`
+marks `lab1/`, `lab2/`, `lab3/` and `shared/` exactly as published on Day 1. It is pushed to
+`origin` (this fork), so it survives even if the upstream repo is deleted. If you break a starter
+file, reset it with `restore-lab.sh`:
 
 ```bash
-bash restore-lab.sh lab1 --dry-run          # 1. see which files you've changed (changes nothing)
-diff backup_labs/lab1/gate_starter.py lab1/gate_starter.py   # optional: see exactly what changed
-bash restore-lab.sh lab1 gate_starter.py    # 2a. reset ONE file
-bash restore-lab.sh lab1                    # 2b. or reset the whole lab
-bash restore-lab.sh all                     # 2c. or reset every lab + shared/
+bash restore-lab.sh lab1 --dry-run                     # 1. see which files you've changed (changes nothing)
+git diff workshop-original -- lab1/gate_starter.py     # optional: see exactly what changed
+bash restore-lab.sh lab1 gate_starter.py               # 2a. reset ONE file
+bash restore-lab.sh lab1                               # 2b. or reset the whole lab
+bash restore-lab.sh all                                # 2c. or reset every lab + shared/
+bash restore-lab.sh lab1 --from upstream/main          # or reset to the instructor's LATEST version
 ```
 
 How it keeps you safe:
@@ -347,20 +350,24 @@ How it keeps you safe:
 - **Undoable** — before overwriting, it copies your current version to `.restore_snapshots/<UTC timestamp>/`.
   To get your work back: `cp .restore_snapshots/<timestamp>/lab1/gate_starter.py lab1/`.
   Snapshots are local only (git-ignored).
-- **Never deletes** — files you created yourself are left alone; only files that exist in `backup_labs/` are restored.
-- **Never edits `backup_labs/`** — treat that folder as read-only.
+- **Never deletes** — files you created yourself are left alone; only files that exist in the source ref are restored.
+- **Working tree only** — your commits and staged changes are not touched.
 
-**Git alternatives** (no backup folder needed):
+**Plain git equivalents** (no prompt, no snapshot — commit or `git stash` first):
 
 ```bash
-git restore lab1/gate_starter.py                          # undo uncommitted edits → your last commit
-git checkout upstream/main -- lab1/gate_starter.py        # reset to the instructor's latest version
+git restore lab1/gate_starter.py                                  # undo uncommitted edits → your last commit
+git restore --source=workshop-original lab1/gate_starter.py       # reset to the Day 1 original
+git restore --source=upstream/main lab1/gate_starter.py           # reset to the instructor's latest version
+git show workshop-original:lab1/gate_starter.py                   # read the original without changing anything
 ```
 
 > Commit your lab work regularly (`git add lab1 && git commit -m "lab1: gates done"`). A commit is
 > the most reliable restore point — `restore-lab.sh` resets to the *original*, git resets to *your last good state*.
 
-To refresh `backup_labs/` after the instructor publishes updates, see [backup_labs/README.md](backup_labs/README.md).
+**On a fresh clone** of this fork, fetch the tag first: `git fetch origin --tags`.
+**To pick up instructor fixes**, run `git fetch upstream` now and then; anything fetched stays in
+your local repo even if the upstream repo later disappears.
 
 ---
 
@@ -372,9 +379,9 @@ apo_labs/
 ├── requirements.txt
 ├── cluster-setup.sh                 one-command real-cluster setup + checks
 ├── cluster-teardown.sh              stop background processes; pause (--keep) or delete cluster
-├── restore-lab.sh                   reset lab files to the originals in backup_labs/
-├── backup_labs/                     untouched copy of lab1–3 + shared (read-only)
+├── restore-lab.sh                   reset lab files to the originals (git tag workshop-original)
 ├── docs/                            slides, reference workbook, worksheets, notes
+├── graphify-out/                    knowledge graph of code + docs (open graph.html; GRAPH_REPORT.md summary)
 ├── lab1/
 │   ├── payment-service/             FastAPI target service
 │   │   ├── app.py
