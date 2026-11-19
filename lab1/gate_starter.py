@@ -101,7 +101,11 @@ class GateOrchestrator:
         Hint: reason string should include the actual value and the threshold.
         Example: "cost $1200/hr exceeds limit $500/hr"
         """
-        # TODO: implement this gate
+        limit  = self.config.cost_per_hour_usd_max
+        actual = proposal.estimated_cost_per_hour_usd
+        if actual <= limit:
+            return True, ""
+        return False, f"cost ${actual:.0f}/hr exceeds limit ${limit:.0f}/hr"
         raise NotImplementedError("Implement _cost_gate()")
 
     def _blast_radius_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -111,7 +115,11 @@ class GateOrchestrator:
 
         Example: "blast radius 15% exceeds limit 10%"
         """
-        # TODO: implement this gate
+        limit  = self.config.blast_radius_max
+        actual = proposal.blast_radius_fraction
+        if actual <= limit:
+            return True, ""
+        return False, f"blast radius {actual:.0%} exceeds limit {limit:.0%}"
         raise NotImplementedError("Implement _blast_radius_gate()")
 
     def _reversibility_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -121,7 +129,11 @@ class GateOrchestrator:
 
         Example: "reversal time 900s exceeds limit 600s"
         """
-        # TODO: implement this gate
+        limit  = self.config.reversal_time_sec_max
+        actual = proposal.reversal_time_seconds
+        if actual <= limit:
+            return True, ""
+        return False, f"reversal time {actual}s exceeds limit {limit}s"
         raise NotImplementedError("Implement _reversibility_gate()")
 
     def _time_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -136,7 +148,12 @@ class GateOrchestrator:
 
         Tip: use datetime.now(timezone.utc).hour to get the current hour.
         """
-        # TODO: implement this gate
+        start_h, end_h = self.config.peak_hours_utc
+        current_h = datetime.now(timezone.utc).hour
+        if start_h <= current_h < end_h:
+            return False, (f"action blocked during peak hours "
+                           f"({start_h:02d}:00–{end_h:02d}:00 UTC), current hour={current_h:02d}")
+        return True, ""
         raise NotImplementedError("Implement _time_gate()")
 
 
