@@ -200,6 +200,20 @@ All four starters showing their "not implemented" message with no Python errors 
 
 The lab cluster hosts three components that the APO agent talks to: the payment-service (a FastAPI app that generates realistic latency and error metrics), Prometheus (which scrapes those metrics on a 15-second interval), and your APO agent code (running locally and reaching both over port-forwards). Setting up in this order — cluster, then application, then metrics — mirrors how you'd onboard a new service to production monitoring.
 
+### Quick setup (recommended) — one command
+
+From the repo root (Linux, WSL2 or macOS):
+
+```bash
+bash cluster-setup.sh        # create/resume cluster, deploy everything, start port-forwards + load generator, run the 6 checks
+bash cluster-teardown.sh --keep   # done for today: stop background processes, pause the cluster
+bash cluster-teardown.sh          # done for good: stop everything and delete the cluster
+```
+
+`cluster-setup.sh` is safe to re-run (it reuses the cluster, image and `.venv`), runs port-forwards and the load generator in the background (logs in `lab1/.lab_logs/`), and ends with the same six checks as [Verify cluster is ready](#verify-cluster-is-ready). Re-run it after a reboot or `--keep` to bring everything back. The manual steps below do the same thing by hand.
+
+### Manual setup
+
 **macOS** — start Colima first if not already running:
 
 ```bash
@@ -234,7 +248,12 @@ kubectl create namespace monitoring
 kubectl create configmap prometheus-config \
   --from-file=prometheus.yml=lab1/prometheus-config.yaml \
   -n monitoring
-kubectl apply -f lab1/prometheus-config.yaml
+# RBAC lets Prometheus discover the payment-service pods (kubernetes_sd_configs)
+kubectl apply -f lab1/k8s/prometheus-rbac.yaml
+# prometheus-config.yaml holds the scrape config AND the Deployment/Service.
+# Apply only the Kubernetes part (from the first apiVersion: line) — applying the
+# whole file fails with "apiVersion not set, kind not set".
+sed -n '/^apiVersion:/,$p' lab1/prometheus-config.yaml | kubectl apply -f -
 ```
 
 Port-forwards create a tunnel from your laptop to a service inside the cluster. kubectl does not multiplex port-forwards, so each one must run in its own terminal window to remain active while you work.
@@ -309,12 +328,53 @@ Labs run in order — each builds on the previous. Attend the lecture module bef
 
 ---
 
+## Restoring a lab to the original code
+
+`backup_labs/` holds an untouched copy of `lab1/`, `lab2/`, `lab3/` and `shared/` exactly as the
+instructor published them. If you break a starter file, reset it with `restore-lab.sh`:
+
+```bash
+bash restore-lab.sh lab1 --dry-run          # 1. see which files you've changed (changes nothing)
+diff backup_labs/lab1/gate_starter.py lab1/gate_starter.py   # optional: see exactly what changed
+bash restore-lab.sh lab1 gate_starter.py    # 2a. reset ONE file
+bash restore-lab.sh lab1                    # 2b. or reset the whole lab
+bash restore-lab.sh all                     # 2c. or reset every lab + shared/
+```
+
+How it keeps you safe:
+
+- **Asks first** — lists every file it will overwrite and waits for `y` (add `--yes` to skip the prompt).
+- **Undoable** — before overwriting, it copies your current version to `.restore_snapshots/<UTC timestamp>/`.
+  To get your work back: `cp .restore_snapshots/<timestamp>/lab1/gate_starter.py lab1/`.
+  Snapshots are local only (git-ignored).
+- **Never deletes** — files you created yourself are left alone; only files that exist in `backup_labs/` are restored.
+- **Never edits `backup_labs/`** — treat that folder as read-only.
+
+**Git alternatives** (no backup folder needed):
+
+```bash
+git restore lab1/gate_starter.py                          # undo uncommitted edits → your last commit
+git checkout upstream/main -- lab1/gate_starter.py        # reset to the instructor's latest version
+```
+
+> Commit your lab work regularly (`git add lab1 && git commit -m "lab1: gates done"`). A commit is
+> the most reliable restore point — `restore-lab.sh` resets to the *original*, git resets to *your last good state*.
+
+To refresh `backup_labs/` after the instructor publishes updates, see [backup_labs/README.md](backup_labs/README.md).
+
+---
+
 ## Repository layout
 
 ```
 apo_labs/
 ├── README.md                        ← this file
 ├── requirements.txt
+├── cluster-setup.sh                 one-command real-cluster setup + checks
+├── cluster-teardown.sh              stop background processes; pause (--keep) or delete cluster
+├── restore-lab.sh                   reset lab files to the originals in backup_labs/
+├── backup_labs/                     untouched copy of lab1–3 + shared (read-only)
+├── docs/                            slides, reference workbook, worksheets, notes
 ├── lab1/
 │   ├── payment-service/             FastAPI target service
 │   │   ├── app.py
@@ -345,6 +405,8 @@ apo_labs/
 ## Cleanup
 
 ```bash
+bash cluster-teardown.sh          # stops port-forwards + load generator, deletes the cluster
+# or, manually:
 k3d cluster delete apo-lab
 ```
 

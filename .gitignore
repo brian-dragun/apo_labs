@@ -20,6 +20,7 @@ ENV/
 lab2/audit_log.jsonl
 lab3/audit_log.jsonl
 lab*/.lab_pids
+lab*/.lab_logs/
 *.jsonl
 
 # macOS
@@ -56,3 +57,9 @@ htmlcov/
 .env.*
 *.pem
 *.key
+
+# Windows download metadata (created when files are copied from a Windows download)
+*:Zone.Identifier
+
+# restore-lab.sh snapshots of your work taken before each restore (local only)
+.restore_snapshots/
