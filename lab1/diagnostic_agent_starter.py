@@ -42,8 +42,8 @@ Run (real mode — requires port-forwarded Prometheus):
 # HOW TO READ THIS FILE
 #   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
 #   is what I wrote for the lab. Everything else is the instructor's original.
-#   Original copy:  backup_labs/lab1/diagnostic_agent_starter.py
-#   See every change:  diff backup_labs/lab1/diagnostic_agent_starter.py lab1/diagnostic_agent_starter.py
+#   Original copy:  git show workshop-original:lab1/diagnostic_agent_starter.py
+#   See every change:  git diff workshop-original -- lab1/diagnostic_agent_starter.py
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
