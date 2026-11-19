@@ -63,3 +63,9 @@ htmlcov/
 
 # restore-lab.sh snapshots of your work taken before each restore (local only)
 .restore_snapshots/
+
+# graphify: commit graph.html / graph.json / GRAPH_REPORT.md; keep machine-local state out
+graphify-out/cache/
+graphify-out/.graphify_*
+graphify-out/manifest.json
+graphify-out/cost.json
