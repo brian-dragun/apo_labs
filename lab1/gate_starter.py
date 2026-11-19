@@ -27,6 +27,14 @@ Run (real mode — requires Prometheus and k3d):
     python gate_starter.py
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO READ THIS FILE
+#   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
+#   is what I wrote for the lab. Everything else is the instructor's original.
+#   Original copy:  backup_labs/lab1/gate_starter.py
+#   See every change:  diff backup_labs/lab1/gate_starter.py lab1/gate_starter.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
@@ -101,11 +109,15 @@ class GateOrchestrator:
         Hint: reason string should include the actual value and the threshold.
         Example: "cost $1200/hr exceeds limit $500/hr"
         """
+        # >>>>> MY CODE START — Lab 1 Step 2: cost gate
+        #       (replaced the instructor's "# TODO: implement this gate" stub)
         limit  = self.config.cost_per_hour_usd_max
         actual = proposal.estimated_cost_per_hour_usd
         if actual <= limit:
             return True, ""
         return False, f"cost ${actual:.0f}/hr exceeds limit ${limit:.0f}/hr"
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement _cost_gate()")
 
     def _blast_radius_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -115,11 +127,15 @@ class GateOrchestrator:
 
         Example: "blast radius 15% exceeds limit 10%"
         """
+        # >>>>> MY CODE START — Lab 1 Step 2: blast-radius gate
+        #       (replaced the instructor's "# TODO: implement this gate" stub)
         limit  = self.config.blast_radius_max
         actual = proposal.blast_radius_fraction
         if actual <= limit:
             return True, ""
         return False, f"blast radius {actual:.0%} exceeds limit {limit:.0%}"
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement _blast_radius_gate()")
 
     def _reversibility_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -129,11 +145,15 @@ class GateOrchestrator:
 
         Example: "reversal time 900s exceeds limit 600s"
         """
+        # >>>>> MY CODE START — Lab 1 Step 2: reversibility gate
+        #       (replaced the instructor's "# TODO: implement this gate" stub)
         limit  = self.config.reversal_time_sec_max
         actual = proposal.reversal_time_seconds
         if actual <= limit:
             return True, ""
         return False, f"reversal time {actual}s exceeds limit {limit}s"
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement _reversibility_gate()")
 
     def _time_gate(self, proposal: ActionProposal) -> tuple[bool, str]:
@@ -148,12 +168,16 @@ class GateOrchestrator:
 
         Tip: use datetime.now(timezone.utc).hour to get the current hour.
         """
+        # >>>>> MY CODE START — Lab 1 Step 2: time gate
+        #       (replaced the instructor's "# TODO: implement this gate" stub)
         start_h, end_h = self.config.peak_hours_utc
         current_h = datetime.now(timezone.utc).hour
         if start_h <= current_h < end_h:
             return False, (f"action blocked during peak hours "
                            f"({start_h:02d}:00–{end_h:02d}:00 UTC), current hour={current_h:02d}")
         return True, ""
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement _time_gate()")
 
 

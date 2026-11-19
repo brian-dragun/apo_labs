@@ -38,8 +38,17 @@ Run (real mode — requires port-forwarded Prometheus):
     python diagnostic_agent_starter.py --prometheus-url http://localhost:9090
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO READ THIS FILE
+#   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
+#   is what I wrote for the lab. Everything else is the instructor's original.
+#   Original copy:  backup_labs/lab1/diagnostic_agent_starter.py
+#   See every change:  diff backup_labs/lab1/diagnostic_agent_starter.py lab1/diagnostic_agent_starter.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import argparse
+import math   # MY CODE (Lab 1 Step 3C): math.isnan() in PrometheusClient.query()
 import sys
 from datetime import datetime, timezone
 
@@ -79,8 +88,24 @@ class PrometheusClient:
             # data["data"]["result"] is a list of {metric: {}, value: [timestamp, "value"]}
             # Return float(data["data"]["result"][0]["value"][1])
         """
-        # TODO: implement this method
-        raise NotImplementedError("Implement PrometheusClient.query()")
+        # >>>>> MY CODE START — Lab 1 Step 3C: PrometheusClient.query()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        endpoint = f"{self.base_url}/api/v1/query"
+        try:
+            response = requests.get(endpoint, params={"query": promql}, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            return None   # Prometheus unreachable or returned non-JSON
+        if data.get("status") != "success":
+            return None   # e.g. a PromQL syntax error
+        result = data["data"]["result"]
+        if not result:
+            return None   # query matched no series (e.g. no traffic yet)
+        value = float(result[0]["value"][1])
+        # 0/0 in PromQL (no traffic) yields NaN — treat it as "no data"
+        return None if math.isnan(value) else value
+        # <<<<< MY CODE END
 
 
 # ── TODO: Implement MetricsReader ────────────────────────────────────────────
@@ -113,8 +138,49 @@ class MetricsReader:
 
         Tip: use round(..., 4) on each value.
         """
-        # TODO: implement this method
-        raise NotImplementedError("Implement MetricsReader.read()")
+        # >>>>> MY CODE START — Lab 1 Step 3C: MetricsReader.read()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        # payment-service runs 2 pods, so each query aggregates across them.
+        # The docstring examples return one series per pod and query() only reads
+        # the first, so the result would depend on which pod Prometheus lists first.
+        sel = f'deployment="{self.deployment}",namespace="{self.namespace}"'
+
+        # Worst pod wins: a fault on either pod should be visible
+        memory = self.client.query(f"max(process_memory_usage_ratio{{{sel}}})")
+
+        # sum() both sides before dividing; dividing per-series would compare each
+        # 5xx series with itself (always 1.0). "or vector(0)" = no errors yet → 0.
+        error_rate = self.client.query(
+            f'(sum(rate(http_requests_total{{{sel},status_code=~"5.."}}[2m])) or vector(0))'
+            f" / sum(rate(http_requests_total{{{sel}}}[2m]))"
+        )
+
+        # histogram_quantile needs buckets summed by "le" to combine the pods
+        p99_seconds = self.client.query(
+            f"histogram_quantile(0.99, sum by (le) "
+            f"(rate(http_request_duration_seconds_bucket{{{sel}}}[2m])))"
+        )
+
+        restarts = self.client.query(f"sum(increase(container_restart_total{{{sel}}}[1h]))")
+
+        # Seconds since the most recent successful scrape of any payment-service pod.
+        # "and (up == 1)" keeps only healthy targets; filtering inside timestamp()
+        # (timestamp(up == 1)) would return the query time and always read 0 s.
+        scrape_age = self.client.query(
+            f"time() - max(timestamp(up{{{sel}}}) and (up{{{sel}}} == 1))"
+        )
+
+        # Missing data never triggers a symptom (0.0) and missing freshness scores
+        # as stale (inf → F = 0.40), so an unreachable Prometheus escalates to a human.
+        return {
+            "memory_usage_ratio":      round(memory or 0.0, 4),
+            "error_rate_ratio":        round(error_rate or 0.0, 4),
+            "p99_latency_ms":          round((p99_seconds or 0.0) * 1000, 4),
+            "p99_baseline_ms":         SIMULATED_METRICS["p99_baseline_ms"],  # no live baseline yet
+            "restart_count_1h":        round(restarts or 0.0, 4),
+            "last_scrape_age_seconds": round(scrape_age, 4) if scrape_age is not None else float("inf"),
+        }
+        # <<<<< MY CODE END
 
 
 # ── TODO: Implement ConfidenceScorer ─────────────────────────────────────────
@@ -178,8 +244,39 @@ class ConfidenceScorer:
         Composite:
             C = round(0.35*S + 0.25*H + 0.25*R + 0.15*F, 4)
         """
-        # TODO: implement this method
-        raise NotImplementedError("Implement ConfidenceScorer.compute()")
+        # >>>>> MY CODE START — Lab 1 Step 3B: ConfidenceScorer.compute()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        # S — Signal Clarity: how strongly memory pressure shows in the metrics
+        mem = metrics.get("memory_usage_ratio", 0.0)
+        if mem > 0.90:
+            s = 0.95
+        elif mem > 0.85:
+            s = 0.80
+        elif mem > 0.75:
+            s = 0.60
+        else:
+            s = 0.40
+
+        # H — Historical Match: past success of this action for this symptom
+        h = self.HISTORICAL_MATCH.get((symptom_class, action_id), 0.50)
+
+        # R — Remediation Confidence: general reliability of this action
+        r = self.REMEDIATION_CONFIDENCE.get(action_id, 0.50)
+
+        # F — Data Freshness: stale (or missing) scrape age lowers confidence
+        age = metrics.get("last_scrape_age_seconds", float("inf"))
+        if age < 30:
+            f = 0.95
+        elif age < 60:
+            f = 0.80
+        elif age < 120:
+            f = 0.65
+        else:
+            f = 0.40
+
+        c = round(0.35 * s + 0.25 * h + 0.25 * r + 0.15 * f, 4)
+        return {"S": s, "H": h, "R": r, "F": f, "C": c}
+        # <<<<< MY CODE END
 
 
 # ── TODO: Implement symptom detection ────────────────────────────────────────
@@ -200,8 +297,24 @@ def detect_symptom_class(metrics: dict[str, float]) -> str:
       "MEMORY_PRESSURE", "DB_BOTTLENECK", "DEPLOYMENT_REGRESSION",
       "CAPACITY_EXHAUSTION", "UNKNOWN"
     """
-    # TODO: implement this function
-    raise NotImplementedError("Implement detect_symptom_class()")
+    # >>>>> MY CODE START — Lab 1 Step 3A: detect_symptom_class()
+    #       (replaced the instructor's "# TODO: implement this function" stub)
+    memory   = metrics.get("memory_usage_ratio", 0.0)
+    p99      = metrics.get("p99_latency_ms", 0.0)
+    errors   = metrics.get("error_rate_ratio", 0.0)
+    restarts = metrics.get("restart_count_1h", 0.0)
+
+    # Order matters: the first matching rule wins
+    if memory > 0.85:
+        return "MEMORY_PRESSURE"
+    if p99 > 500 and errors > 0.05:
+        return "DB_BOTTLENECK"
+    if errors > 0.10:
+        return "DEPLOYMENT_REGRESSION"
+    if restarts > 5:
+        return "CAPACITY_EXHAUSTION"
+    return "UNKNOWN"
+    # <<<<< MY CODE END
 
 
 def symptom_to_action(symptom_class: str) -> str:
