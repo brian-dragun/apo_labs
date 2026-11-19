@@ -1,0 +1,12 @@
+Agentic PLatform Operation Building AI AGents for Incident Response
+
+Harness (Decides if an Action runs)
+    Cost 
+    Blast radius
+
+
+
+Focus will be harness or scaffloing around the modeling
+
+
+| Prometheus | Time-series metrics store
