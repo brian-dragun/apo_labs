@@ -40,14 +40,17 @@ CHECKOUT_PAYLOADS = [
 
 
 def _post(url: str, payload: dict) -> tuple[int, float]:
-    """Send a POST request; return (status_code, latency_ms)."""
-    data = json.dumps(payload).encode()
-    req  = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    """Send a checkout request; return (status_code, latency_ms)."""
+    # >>>>> MY CODE START — bug fix: payment-service only serves GET /checkout
+    #       (app.py: @app.get("/checkout")). The instructor's POST got 405 on every
+    #       request, so no checkout metrics were ever recorded and the fault never fired.
+    #       The app ignores the body, so the payload is no longer sent.
+    #       Instructor's original:
+    #           data = json.dumps(payload).encode()
+    #           req  = urllib.request.Request(url, data=data,
+    #                      headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(url, method="GET")
+    # <<<<< MY CODE END
     t0 = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:

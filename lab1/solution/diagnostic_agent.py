@@ -5,6 +5,15 @@ Complete implementation of the diagnostic agent.
 Do not share with students before the lab exercise.
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO READ THIS FILE
+#   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
+#   is my bug fix to the instructor's reference (MetricsReader.read() queries).
+#   Lab 2 and Lab 3 import this file, so the fix applies to them too.
+#   Original copy:  git show workshop-original:lab1/solution/diagnostic_agent.py
+#   See every change:  git diff workshop-original -- lab1/solution/diagnostic_agent.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import argparse
 import sys
@@ -57,29 +66,44 @@ class MetricsReader:
     def read(self) -> dict[str, float]:
         d = self.deployment
 
+        # >>>>> MY CODE START — bug fix: aggregate across all pods
+        #       The deployment runs 2 pods, so each query returns one series per pod and
+        #       query() keeps only result[0]. Lab 2 port-forwards to ONE pod, so that first
+        #       series was often the idle pod (memory 0.0) and the fault was never seen.
+        #       Instructor's original queries, for comparison:
+        #         memory:   process_memory_usage_ratio{deployment="..."}
+        #         errors:   rate(5xx[2m]) / rate(all[2m])      (per pod, NaN with no 5xx)
+        #         p99:      histogram_quantile(0.99, rate(bucket[2m])) * 1000   (per pod)
+        #         restarts: increase(container_restart_total[1h])               (per pod)
+        #         freshness: time() - max(scrape_time{job="..."})  (metric doesn't exist,
+        #                    so it always fell back to 15.0)
         memory = self.client.query(
-            f'process_memory_usage_ratio{{deployment="{d}"}}'
+            f'max(process_memory_usage_ratio{{deployment="{d}"}})'          # worst pod
         ) or 0.0
 
         error_rate = self.client.query(
-            f'rate(http_requests_total{{deployment="{d}",status_code=~"5.."}}[2m])'
-            f' / rate(http_requests_total{{deployment="{d}"}}[2m])'
+            f'(sum(rate(http_requests_total{{deployment="{d}",status_code=~"5.."}}[2m]))'
+            f' or vector(0))'                                               # no 5xx yet → 0
+            f' / (sum(rate(http_requests_total{{deployment="{d}"}}[2m])) > 0)'  # no traffic → None, not NaN
         ) or 0.0
 
         p99 = self.client.query(
             f'histogram_quantile(0.99,'
-            f'  rate(http_request_duration_seconds_bucket{{deployment="{d}"}}[2m])'
-            f') * 1000'
+            f'  sum by (le) (rate(http_request_duration_seconds_bucket{{deployment="{d}"}}[2m]))'
+            f') * 1000 >= 0'                                                # ">= 0" drops NaN (no traffic)
         ) or 0.0
 
         restarts = self.client.query(
-            f'increase(container_restart_total{{deployment="{d}"}}[1h])'
+            f'sum(increase(container_restart_total{{deployment="{d}"}}[1h]))'
         ) or 0.0
 
-        # Freshness: difference between now and the last scrape timestamp
+        # Freshness: seconds since the newest successful scrape of any pod
         last_scrape = self.client.query(
-            f'time() - max(scrape_time{{job="{d}"}})'
-        ) or 15.0
+            f'time() - max(timestamp(up{{job="{d}"}}) and (up{{job="{d}"}} == 1))'
+        )
+        if last_scrape is None:
+            last_scrape = float("inf")   # no successful scrape → data is stale (F = 0.40)
+        # <<<<< MY CODE END
 
         return {
             "memory_usage_ratio":      round(memory, 4),
