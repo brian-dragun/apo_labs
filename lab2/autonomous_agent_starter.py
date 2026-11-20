@@ -231,7 +231,45 @@ class VerificationLoop:
 
         Hint: threshold_ms = baseline_p90_ms * 1.5
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 2 Step 4: VerificationLoop.wait_for_recovery()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        threshold_ms = baseline_p90_ms * 1.5
+
+        def result(recovered: bool, p90: float | None, elapsed: float, polls: int) -> dict:
+            return {
+                "recovered":       recovered,
+                "final_p90_ms":    p90,     # None = Prometheus never returned a value
+                "threshold_ms":    threshold_ms,
+                "elapsed_seconds": round(elapsed, 1),
+                "polls":           polls,
+            }
+
+        # Part A — simulate: one poll against the canned post-restart metrics
+        if self.simulate:
+            time.sleep(self.poll_interval)
+            p90 = SIMULATED_POST_RESTART["p99_latency_ms"]
+            return result(p90 < threshold_ms, p90, float(self.poll_interval), 1)
+
+        # Part B — real: poll Prometheus until P90 < threshold or timeout.
+        # Beyond the README query: sum by (le) gives one service-wide P90 instead of
+        # one series per pod, and ">= 0" drops the NaN Prometheus returns with no traffic.
+        promql = (
+            f'histogram_quantile(0.90, sum by (le) ('
+            f'rate(http_request_duration_seconds_bucket{{deployment="{deployment}"}}[1m])'
+            f')) * 1000 >= 0'
+        )
+        start = time.monotonic()
+        polls, p90 = 0, None
+        while time.monotonic() - start < self.timeout:
+            p90 = self.client.query(promql)
+            polls += 1
+            # None = no data (Prometheus down, or new pods not scraped yet) → keep polling
+            if p90 is not None and p90 < threshold_ms:
+                return result(True, p90, time.monotonic() - start, polls)
+            time.sleep(self.poll_interval)
+        return result(False, p90, time.monotonic() - start, polls)
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement VerificationLoop.wait_for_recovery()")
 
 
@@ -250,7 +288,14 @@ class AuditLogger:
             with open(self.path, "a") as f:
                 f.write(json.dumps(record) + "\n")
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 2 Step 5: AuditLogger.append()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        # "a" appends, so earlier runs are never overwritten; one record per line = JSONL
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        return
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement AuditLogger.append()")
 
 

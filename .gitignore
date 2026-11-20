@@ -69,3 +69,6 @@ graphify-out/cache/
 graphify-out/.graphify_*
 graphify-out/manifest.json
 graphify-out/cost.json
+
+# APO audit logs written by the lab agents at runtime
+apo_audit.jsonl
