@@ -1,0 +1,55 @@
+
+Packtpub Workshops: https://landing.packtpub.com/ai-infra-engineering/#events
+https://www.eventbrite.co.uk/e/building-autonomous-operations-agents-for-production-safety-at-speed-tickets-2003624969219?keep_tld=true
+
+Building Autonomous Operations: Agents for Production Safety at Speed
+By
+Packt Publishing Limited
+Thursday, November 19-Friday, November 20  •  9 AM-1 PM EST
+
+Ajay Chankramath
+https://github.com/achankra
+
+Overview
+Build AI agents that diagnose and fix production incidents safely, with autonomy levels, guardrails and multi-agent orchestration.
+
+Your incident response system is 92% sure of the fix. It’s peak traffic. Should it act? This workshop teaches operational teams to design autonomous systems with safety gates that prevent costly mistakes.
+
+Building Autonomous Operations is a two-day, hands-on workshop where SREs and platform engineers build AI agents that detect, diagnose and fix production incidents   safely. You’ll pair probabilistic agents with deterministic gates, move workflows up a five-level autonomy ladder, and leave with a working detect → diagnose → execute → verify platform.
+
+Why now
+Manual incident response is slow but predictable: a typical bad deploy takes around 30 minutes to diagnose and roll back. An AI agent can do it in a couple of minutes f it’s right. The gap between those two numbers is confidence, and most teams have no way to measure or bound it. APO gives you the patterns to close that gap without handing production to a black box.
+
+What you’ll build
+An incident diagnosis agent that proposes a root cause with a calibrated confidence score and a full audit trail
+Four operational gates   cost, blast radius, reversibility and time   that stop risky actions before they run
+A three-agent system (metrics, logs, action) with an orchestrator that resolves conflicting fixes
+An agent-ops dashboard tracking confidence accuracy, gate rejections, escalations and MTTR
+A phased rollout plan for your own environment
+Format:
+2 days × 4 hours, live and hybrid, capped at 25 seats. Roughly half lecture, half labs. Labs run against the Claude API or in a no-cost simulate mode, so no API spend is required.
+
+Outcomes, audience and prerequisites
+By the end of this workshop you will be able to:
+
+Map your operational workflows to the APO Autonomy Ladder (L1–L5) and choose where agents cut MTTR without adding risk
+Implement four operational gates   cost, blast radius, reversibility and time   that block unsafe agent actions while keeping recovery under 2 minutes
+Build an incident diagnosis agent that returns a root cause, a calibrated confidence score and an audit trail
+Orchestrate three or more agents on one incident without conflicts or duplicate actions
+Design dashboards that track confidence accuracy, gate rejection rate and escalation load
+Run a full detect → diagnose → execute → verify workflow in under 45 seconds in the lab environment
+Draft a phased L1 → L3 rollout plan for your own environment with measurable success criteria
+Who should attend
+SREs who want to cut on-call toil and automate incident response safely
+Platform engineers scaling operations beyond manual runbooks
+Ops and platform architects designing multi-agent systems
+Engineering leaders deciding whether agentic automation is worth the risk
+You’ll need
+Hands-on SRE, platform engineering or DevOps experience, including incident response
+Working Python, Git, REST APIs and a terminal + IDE
+Basic monitoring and observability knowledge
+Helpful but not required:
+Kubernetes or Docker, CI/CD pipelines, prior use of an LLM API, incident automation experience.
+
+Who is this for?
+SREs, platform engineers, DevOps engineers and engineering leaders with hands-on incident response experience and working Python.
