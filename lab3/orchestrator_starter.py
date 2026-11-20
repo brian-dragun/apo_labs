@@ -30,14 +30,24 @@ Run (real mode):
     python orchestrator_starter.py --prometheus-url http://localhost:9090
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO READ THIS FILE
+#   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
+#   is what I wrote for the lab. Everything else is the instructor's original.
+#   Original copy:  git show workshop-original:lab3/orchestrator_starter.py
+#   See every change:  git diff workshop-original -- lab3/orchestrator_starter.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import asyncio
 import argparse
 import json
+import subprocess   # MY CODE (Lab 3 Step 3) — LogsAgent runs kubectl logs
 import sys
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from dataclasses import replace   # MY CODE (Lab 3 Step 4) — adjust findings without mutating them
 from pathlib import Path
 from typing import Optional
 
@@ -142,7 +152,43 @@ class MetricsAgent:
         Note: This is an async method. Use `await asyncio.sleep(0)` to yield
         control back to the event loop periodically.
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 3 Step 2: MetricsAgent.diagnose()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        start = time.monotonic()
+
+        if self.simulate:
+            await asyncio.sleep(0.02)                     # simulated Prometheus latency
+            return AgentFinding(
+                agent_name="metrics",
+                **SIMULATED_METRICS_FINDING,              # symptom_class, action_id, confidence, evidence
+                duration_ms=int((time.monotonic() - start) * 1000),
+                timed_out=False,
+            )
+
+        # Real mode: same lab1/solution reader Lab 2 uses (with the multi-pod query fix),
+        # imported at the top of the file.
+        # MetricsReader.read() is synchronous (requests); run it in a worker thread so
+        # the event loop keeps running LogsAgent concurrently.
+        loop = asyncio.get_running_loop()
+        metrics = await loop.run_in_executor(
+            None, lambda: MetricsReader(self.client, deployment, namespace).read()
+        )
+
+        symptom_class = detect_symptom_class(metrics)
+        action_id     = symptom_to_action(symptom_class)
+        scores        = ConfidenceScorer().compute(metrics, symptom_class, action_id)
+
+        return AgentFinding(
+            agent_name="metrics",
+            symptom_class=symptom_class,
+            action_id=action_id,
+            confidence=scores["C"],
+            evidence={**metrics, "scores": scores},
+            duration_ms=int((time.monotonic() - start) * 1000),
+            timed_out=False,
+        )
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement MetricsAgent.diagnose()")
 
 
@@ -188,7 +234,70 @@ class LogsAgent:
         Tip: use asyncio.create_subprocess_exec or run subprocess in executor
         to avoid blocking the event loop.
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 3 Step 3: LogsAgent.diagnose()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        start = time.monotonic()
+
+        def finding(symptom_class: str, confidence: float, evidence: dict,
+                    error: Optional[str] = None) -> AgentFinding:
+            return AgentFinding(
+                agent_name="logs",
+                symptom_class=symptom_class,
+                action_id=ACTION_MAP.get(symptom_class, "escalate_human"),
+                confidence=confidence,
+                evidence=evidence,
+                duration_ms=int((time.monotonic() - start) * 1000),   # dict has no duration_ms
+                timed_out=False,
+                error=error,
+            )
+
+        if self.simulate:
+            await asyncio.sleep(0.03)                     # simulated kubectl latency
+            return finding(SIMULATED_LOGS_FINDING["symptom_class"],
+                           SIMULATED_LOGS_FINDING["confidence"],
+                           SIMULATED_LOGS_FINDING["evidence"])
+
+        # Real mode: kubectl is synchronous, so run it in a worker thread.
+        # Note: "deployment/<name>" makes kubectl read ONE pod of the deployment.
+        cmd = self.kubectl_logs_cmd or [
+            "kubectl", "logs", f"deployment/{deployment}", "-n", namespace, "--since=10m",
+        ]
+        loop = asyncio.get_running_loop()
+        try:
+            proc = await loop.run_in_executor(
+                None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            # Beyond the README: no logs → low-confidence UNKNOWN, pipeline continues
+            return finding("UNKNOWN", 0.30, {}, error=f"{type(exc).__name__}: {exc}")
+        if proc.returncode != 0:
+            return finding("UNKNOWN", 0.30, {}, error=proc.stderr.strip())
+
+        output = proc.stdout
+        counts = {pattern: output.count(pattern) for pattern in self.LOG_PATTERNS}
+        # Most frequent pattern; ties go to the first pattern in LOG_PATTERNS (deterministic)
+        top_pattern = max(counts, key=counts.get)
+        occurrences = counts[top_pattern]
+
+        if occurrences >= 5:
+            confidence = 0.90
+        elif occurrences >= 3:
+            confidence = 0.75
+        elif occurrences >= 1:
+            confidence = 0.60
+        else:
+            confidence = 0.30
+
+        symptom_class = self.LOG_PATTERNS[top_pattern] if occurrences else "UNKNOWN"
+        evidence = {
+            "log_pattern":     top_pattern if occurrences else None,
+            "occurrences_10m": occurrences,
+            "pattern_counts":  {p: n for p, n in counts.items() if n},
+            "lines_scanned":   output.count("\n"),
+        }
+        return finding(symptom_class, confidence, evidence)
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement LogsAgent.diagnose()")
 
 
@@ -247,7 +356,88 @@ def arbitrate(findings: list[AgentFinding]) -> ArbitrationResult:
 
     Returns ArbitrationResult with the agreed action and final confidence.
     """
-    # TODO: implement this function
+    # >>>>> MY CODE START — Lab 3 Step 4: arbitrate()
+    #       (replaced the instructor's "# TODO: implement this function" stub)
+    # The caller's findings are never modified: each rule works on adjusted copies
+    # (dataclasses.replace), so the raw agent findings stay intact for the audit trail
+    # and the same input always produces the same output.
+    rules_applied: list[str] = []
+
+    def clamp(c: float) -> float:
+        return round(min(1.0, max(0.0, c)), 4)
+
+    # Rule 1 — timeout penalty
+    adjusted: list[AgentFinding] = []
+    for f in findings:
+        if f.timed_out:
+            f = replace(f, confidence=clamp(f.confidence - 0.05))
+            rules_applied.append(f"timeout_penalty: {f.agent_name}")
+        adjusted.append(f)
+
+    # Rules 2 / 3 — contradiction penalty OR corroboration bonus (mutually exclusive).
+    # Only between agents that actually answered: a timed-out agent's "UNKNOWN" is
+    # an absence of evidence, not a disagreement.
+    by_name = {f.agent_name: f for f in adjusted if not f.timed_out}
+    metrics, logs = by_name.get("metrics"), by_name.get("logs")
+    if metrics and logs:
+        if metrics.symptom_class != logs.symptom_class:
+            delta = -0.15
+            rules_applied.append(
+                f"contradiction: metrics={metrics.symptom_class} vs logs={logs.symptom_class}"
+            )
+        else:
+            delta = +0.10
+            rules_applied.append(f"corroboration: {metrics.symptom_class}")
+        adjusted = [
+            replace(f, confidence=clamp(f.confidence + delta))
+            if f.agent_name in ("metrics", "logs") and not f.timed_out else f
+            for f in adjusted
+        ]
+
+    # Rule 4 — cascade override: a confident DEPLOYMENT_REGRESSION wins outright
+    for f in adjusted:
+        if f.symptom_class == "DEPLOYMENT_REGRESSION" and f.confidence >= 0.80:
+            return ArbitrationResult(
+                agreed_symptom_class="DEPLOYMENT_REGRESSION",
+                agreed_action_id="config.rollback",
+                final_confidence=f.confidence,
+                findings=adjusted,
+                rules_applied=rules_applied + ["cascade_override: DEPLOYMENT_REGRESSION"],
+            )
+
+    # Rule 5 — weighted consensus over agents that answered
+    scores: dict[str, float] = {}
+    best_conf: dict[str, float] = {}
+    for f in adjusted:
+        if f.timed_out:
+            continue
+        weight = AGENT_WEIGHTS.get(f.agent_name, 1.0)
+        scores[f.symptom_class] = scores.get(f.symptom_class, 0.0) + weight * f.confidence
+        best_conf[f.symptom_class] = max(best_conf.get(f.symptom_class, 0.0), f.confidence)
+
+    if not scores:
+        # Beyond the README: every agent timed out → no evidence → escalate
+        return ArbitrationResult(
+            agreed_symptom_class="UNKNOWN",
+            agreed_action_id="escalate_human",
+            final_confidence=0.0,
+            findings=adjusted,
+            rules_applied=rules_applied + ["all_agents_timed_out"],
+        )
+
+    # max() keeps the first key on a tie; agents always report in the same order,
+    # so ties resolve the same way on every run
+    agreed = max(scores, key=scores.get)
+    rules_applied.append(f"weighted_consensus: {agreed} (score={scores[agreed]:.4f})")
+    return ArbitrationResult(
+        agreed_symptom_class=agreed,
+        agreed_action_id=ACTION_MAP.get(agreed, "escalate_human"),
+        final_confidence=best_conf[agreed],
+        findings=adjusted,
+        rules_applied=rules_applied,
+    )
+    # <<<<< MY CODE END
+    # Instructor's original stub below never runs now (my code returns above).
     raise NotImplementedError("Implement arbitrate()")
 
 
@@ -396,7 +586,65 @@ class Orchestrator:
                 safe(self.logs_agent.diagnose(deployment, namespace), "logs"),
             )
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 3 Step 5: Orchestrator.run()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        start = time.monotonic()
+        timeout_s = self.FAN_OUT_TIMEOUT_S
+
+        async def safe(coro, name: str) -> AgentFinding:
+            # Per-agent timeout: a slow agent becomes a timed-out finding instead of
+            # holding up the incident response
+            try:
+                return await asyncio.wait_for(coro, timeout=timeout_s)
+            except asyncio.TimeoutError:
+                return AgentFinding(agent_name=name, symptom_class="UNKNOWN",
+                                    action_id="escalate_human", confidence=0.0,
+                                    evidence={}, duration_ms=int(timeout_s * 1000),
+                                    timed_out=True)
+
+        # Fan-out: both agents run concurrently → wall time ≈ the slowest agent, not the sum
+        findings = list(await asyncio.gather(
+            safe(self.metrics_agent.diagnose(deployment, namespace), "metrics"),
+            safe(self.logs_agent.diagnose(deployment, namespace),    "logs"),
+        ))
+        for f in findings:
+            icon = "⏱ " if f.timed_out else "✅"
+            print(f"  {icon}  {f.agent_name:10s} → {f.symptom_class:25s} "
+                  f"C={f.confidence:.2f} ({f.duration_ms}ms)")
+
+        result = arbitrate(findings)
+        print(f"\nArbitration rules: {result.rules_applied}")
+        print(f"Consensus:  {result.agreed_symptom_class}  →  {result.agreed_action_id}  "
+              f"C={result.final_confidence:.4f}")
+
+        # The starter's act() signature is act(result, deployment, namespace) — the
+        # README's keyword-argument version (action_id=..., symptom_class=...) would
+        # raise TypeError. ActionAgent re-runs the gates before executing.
+        action = await self.action_agent.act(result, deployment, namespace)
+
+        wall_ms = int((time.monotonic() - start) * 1000)
+        print(f"Action: {action.get('outcome')} (total wall time {wall_ms}ms)")
+
+        return {
+            "deployment":    deployment,
+            "namespace":     namespace,
+            "findings":      [
+                {"agent": f.agent_name, "symptom": f.symptom_class, "action": f.action_id,
+                 "confidence": f.confidence, "timed_out": f.timed_out,
+                 "duration_ms": f.duration_ms, "error": f.error}
+                for f in findings                      # raw findings, before arbitration
+            ],
+            "arbitration":   {
+                "symptom_class": result.agreed_symptom_class,
+                "action_id":     result.agreed_action_id,
+                "confidence":    result.final_confidence,
+                "rules_applied": result.rules_applied,
+            },
+            "action":        action,
+            "wall_time_ms":  wall_ms,
+        }
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement Orchestrator.run()")
 
 
