@@ -50,14 +50,26 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent / "lab1" / "solution"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "lab2"))
 
-try:
-    from gate_starter import GateOrchestrator, GateConfig, ActionProposal
-    from diagnostic_agent_starter import (
-        PrometheusClient, ConfidenceScorer, autonomy_level, SIMULATED_METRICS
-    )
-except ImportError:
-    # Structural stubs so the file imports cleanly even without lab1 present
-    pass
+# >>>>> MY CODE START — bug fix: import the modules that actually exist
+#       The instructor's block imported gate_starter / diagnostic_agent_starter, but the
+#       path above only adds lab1/solution (gate.py, diagnostic_agent.py), and lab2 has
+#       neither. The try/except ImportError: pass then hid the failure, so nothing was
+#       imported: ActionAgent returned IMPORT_ERROR and real mode hit NameError on
+#       PrometheusClient. Same modules Lab 2 and lab3/solution use. No try/except now —
+#       a missing module should fail loudly at startup, not silently mid-incident.
+#       Instructor's original:
+#         try:
+#             from gate_starter import GateOrchestrator, GateConfig, ActionProposal
+#             from diagnostic_agent_starter import (
+#                 PrometheusClient, ConfidenceScorer, autonomy_level, SIMULATED_METRICS)
+#         except ImportError:
+#             pass
+from gate import GateOrchestrator, GateConfig, ActionProposal
+from diagnostic_agent import (
+    PrometheusClient, MetricsReader, ConfidenceScorer,
+    detect_symptom_class, symptom_to_action, autonomy_level, SIMULATED_METRICS,
+)
+# <<<<< MY CODE END
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -259,7 +271,7 @@ class ActionAgent:
         namespace:  str,
     ) -> dict:
         try:
-            from gate_starter import GateOrchestrator, GateConfig, ActionProposal
+            from gate import GateOrchestrator, GateConfig, ActionProposal  # MY CODE: bug fix (was gate_starter, not on path)
         except ImportError:
             return {"outcome": "IMPORT_ERROR"}
 
