@@ -523,20 +523,75 @@ path to delete calls and alert on any grant it creates.
 
 ---
 
-## 8. Recommended rollout
+## 8. Rollout: prerequisites, kill switches and phases
 
-| Phase | Scope | Exit criteria |
-|---|---|---|
-| 1 | All six in **shadow mode** (detect + propose + audit, no execution) | 30 days of proposals reviewed; false-positive rate measured per symptom |
-| 2 | APIM revision rollback + backend failover at L3; ADCS CRL republish at L3; app secret-expiry notices at L2 | 10 approved executions, zero bad outcomes |
-| 3 | Foundry failover at L3; AD privileged-group removal and ADCS certificate hold at L3 via JEA; illicit-consent grant revoke at L3 | Same bar per action |
-| 4 | Promote individual actions to L4 where history supports it | Per-action H (historical match) ≥ 0.85 from audit data |
-| — | Conditional Access stays at L1–L2 (PR-based) permanently | — |
+Adapted from the workshop's Module 8 rollout requirements (Kubernetes-centric in the course)
+to the Azure and on-prem platforms in this document.
 
-The audit log from phase 1 is the training data for the H component of the confidence formula —
+### 8.1 What must exist before Phase 1 (shadow mode)
+
+Build from the bottom up — each layer depends on the one beneath it. Phase 1 starts only when
+every layer is in place for the use cases in scope.
+
+| # | Course layer | Equivalent here | Per use case |
+|---|---|---|---|
+| 1 | **Prometheus** — RED metrics for every P0/P1 service | **Azure Monitor metrics + Log Analytics** | APIM gateway logs + `Capacity` · Foundry 429 / 5xx / token metrics · `SigninLogs`, `AuditLogs`, `AADServicePrincipalSignInLogs` · `SecurityEvent` from DCs and issuing CAs via Azure Monitor Agent · Defender for Identity |
+| 2 | **Log aggregation** — structured, central | **One Log Analytics workspace behind Sentinel** | All KQL in §2–§7 runs here; the APO audit table lives here |
+| 3 | **Alertmanager** — webhook entry point for APO | **Azure Monitor action groups + Sentinel automation rules** | Alert / analytics rule → webhook → APO runner (Function, Container App or Logic App) |
+| 4 | **Kubernetes RBAC** — least privilege, never cluster-admin | **Scoped identities — never Owner, Global Admin or Domain Admin** | Read-only detection identity everywhere · managed identity scoped to one APIM / AI resource · per-action Graph permissions (§7) · gMSA + JEA endpoints for AD and AD CS (§5, §6) |
+| 5 | **CI/CD** — every action command tested in staging first | **GitHub Actions / Azure DevOps pipeline exercising each catalog action in non-prod** | Dev APIM · test Foundry deployment · **separate test tenant** (Conditional Access, app registrations) · **isolated lab forest + lab CA** (AD tiering, AD CS) |
+
+For identity and directory use cases, "staging" means a separate tenant or forest — a
+non-production OU inside the real forest is not isolation.
+
+### 8.2 Rollback: three switches, narrow to broad
+
+Reach for the narrowest switch that stops the problem.
+
+| Switch | Diagnose | Log | Act | Implementation | Example |
+|---|---|---|---|---|---|
+| **Disable one action class** | ✅ | ✅ | that class only stops | `enabled` flag per catalog entry, held in **Azure App Configuration feature flags** (flip without a deploy) | Turn off `adcs.cert_hold`; CRL republish keeps running |
+| **Stop every action** (`ALL_GATES_BLOCK=true`) | ✅ | ✅ | ❌ | A **global gate evaluated first** in the gate orchestrator; blocks every proposal | This *is* shadow mode — Phase 1 runs with it on; Conditional Access stays on it permanently |
+| **Turn APO off** (`APO_ENABLED=false`) | ❌ | ❌ | ❌ | **Disable the Sentinel automation rule / action-group webhook**; alerts route straight to on-call | Back to L1: humans paged as before |
+
+### 8.3 Hardening beyond the course slide
+
+1. **The agent cannot flip its own switches.** Feature flags and automation rules sit outside
+   every APO identity's write scope. A compromised agent that can re-enable itself has no kill
+   switch. Critical for the Tier 0 use cases.
+2. **Tier 0 hard stop independent of APO code.** For AD (§5) and AD CS (§6), unregistering the
+   JEA session configuration (`Unregister-PSSessionConfiguration`) halts every Tier 0 action even
+   if the agent or its configuration store is misbehaving.
+3. **Nothing is lost.** The audit record is written *before* switch evaluation, so every mode —
+   including APO off — records the alert and where it was routed.
+4. **Humans back fast (< 60 s).** Through Phases 1–2 the human paging route runs **in parallel**
+   with APO rather than being replaced by it, so turning APO off removes the agent but never has
+   to restore paging.
+5. **Switch changes are audited and alerting.** Any flip of the three switches raises a Sentinel
+   incident with the actor — a disabled kill switch is itself a security event.
+
+### 8.4 Phases
+
+| Phase | Switch state | Scope | Exit criteria |
+|---|---|---|---|
+| 0 | APO off | Build §8.1 layers 1–5; test every catalog action in non-prod | All five layers in place; every action passes in staging |
+| 1 | `ALL_GATES_BLOCK=true` | All six use cases in **shadow mode** (detect + propose + audit, no execution) | 30 days of proposals reviewed; false-positive rate measured per symptom |
+| 2 | Global block off; per-class flags on only for listed actions | APIM revision rollback + backend failover at L3; AD CS CRL republish at L3; app secret-expiry notices at L2 | 10 approved executions per action, zero bad outcomes |
+| 3 | Add classes one at a time | Foundry failover at L3; AD privileged-group removal and AD CS certificate hold at L3 via JEA; illicit-consent grant revoke at L3 | Same bar per action |
+| 4 | Unchanged | Promote individual actions to L4 where history supports it | Per-action H (historical match) ≥ 0.85 from audit data |
+| — | Global block permanent for CA | Conditional Access stays at L1–L2 (PR-based) | — |
+
+The audit log from Phase 1 is the training data for the H component of the confidence formula —
 the same role `apo_audit.jsonl` plays in Lab 2.
 
+> **Gap in the lab code:** the course labs implement none of the three switches. `GateOrchestrator`
+> has no global block and `action_catalog.yaml` has no `enabled` flag. Both are small additions:
+> a first gate that reads `ALL_GATES_BLOCK`, and a catalog lookup before a proposal is built.
+
 ## 9. Open questions
+- Who holds authority to flip each of the three switches, and how fast can they be reached?
+- Which on-call system (PagerDuty, ServiceNow, Teams) is the parallel human route in Phases 1–2?
+- Are a test tenant and an isolated lab forest / lab CA available for §8.1 layer 5?
 - Which change-management system is authoritative for the change-correlation gate?
 - Is a Tier 0 host available to run the JEA endpoint, or does AD action stay at L1–L2 until one is?
 - Is Foundry traffic already fronted by APIM? (Use cases 1 and 2 share failover actions if so.)
