@@ -380,7 +380,7 @@ apo_labs/
 ├── cluster-setup.sh                 one-command real-cluster setup + checks
 ├── cluster-teardown.sh              stop background processes; pause (--keep) or delete cluster
 ├── restore-lab.sh                   reset lab files to the originals (git tag workshop-original)
-├── docs/                            slides, reference workbook, worksheets, notes
+├── docs/                            slides, reference workbook, worksheets, notes, apo-use-cases.md
 ├── graphify-out/                    knowledge graph of code + docs (open graph.html; GRAPH_REPORT.md summary)
 ├── lab1/
 │   ├── payment-service/             FastAPI target service
