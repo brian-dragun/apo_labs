@@ -1,10 +1,10 @@
-# APO Beyond Kubernetes — Five Enterprise Use Cases
+# APO Beyond Kubernetes — Six Enterprise Use Cases
 
 **Status:** Design proposal (not implemented) · **Author:** Brian Dragun · **Date:** 2026-11-20
 **Builds on:** Labs 1–2 (`lab1/gate_starter.py`, `lab1/diagnostic_agent_starter.py`, `lab2/autonomous_agent_starter.py`)
 
 The lab loop — **detect → diagnose → gate → execute → verify → audit** — does not depend on
-Kubernetes. This document maps it onto five platforms and sets an autonomy ceiling for each,
+Kubernetes. This document maps it onto six platforms and sets an autonomy ceiling for each,
 based on blast radius, reversibility, and what a compromised agent identity could reach.
 
 | # | Use case | Fit | Autonomy ceiling | First deliverable |
@@ -14,6 +14,7 @@ based on blast radius, reversibility, and what a compromised agent identity coul
 | 3 | Entra ID Conditional Access | Detection only | **L1–L2** | Policy-change impact + drift detector |
 | 4 | On-prem AD tiering model | Strong detection, narrow action | L1–L3 by tier | Privileged-group drift responder |
 | 5 | Internal AD CS / PKI | Ops: strong · Security: detection, narrow action | L4 (CRL) · L3 (hold) · L1 (key ops) | CRL health responder + ESC1 issuance detector |
+| 6 | Entra ID Enterprise Apps & App Registrations | Strong — top outage and persistence risk | L3 (grant revoke, SP disable) · L2 (config) · L1 (delete) | Secret-expiry + rotation check; illicit-consent responder |
 
 > **Principle carried over from the course:** the model proposes, code decides. Every action is
 > a reviewed catalog entry; gates are deterministic code; the agent never invents a command.
@@ -411,23 +412,137 @@ enforcement) — otherwise a forged or stolen certificate can still be mapped we
 
 ---
 
-## 7. Recommended rollout
+## 7. Use case: Entra ID Enterprise Applications & App Registrations
+
+**Two tracks: credential and provisioning health (outage prevention) and app abuse (consent
+phishing, persistence through service principal credentials, privilege escalation).**
+
+Terms: an **app registration** is the application object (credentials, redirect URIs, requested
+permissions); an **enterprise application** is its service principal (SP) in a tenant (consent
+grants, app role assignments, SAML signing cert, provisioning, user assignment).
+
+### The constraint that drives the design
+
+The Graph permissions that let an agent *fix* apps are the permissions attackers use to take
+over a tenant. `Application.ReadWrite.All` can add a secret to any privileged app;
+`AppRoleAssignment.ReadWrite.All` can grant any app — including the agent — any permission.
+Both are effectively Global Admin. So:
+
+| Identity | Permissions | Purpose |
+|---|---|---|
+| Detection | `Application.Read.All`, `AuditLog.Read.All`, Log Analytics reader | Detect, diagnose, score, audit |
+| Executor | Only the narrow permission each catalog action needs (table below) | Act |
+| Approval-gated pipeline | `Application.ReadWrite.All` / `AppRoleAssignment.ReadWrite.All`, behind required reviewers | Actions that need tenant-wide write — **never** the agent's standing identity |
+
+**The agent never holds rights to add credentials or app role assignments.**
+
+### Track A — credential and provisioning health
+
+| Symptom | Signal | Action | Ceiling |
+|---|---|---|---|
+| `SECRET_EXPIRING` | App registration secret / cert expires < 30 days | Notify owners + ticket; if the app reads from Key Vault, create the new secret and KV version | L2–L3 |
+| `SAML_SIGNING_CERT_EXPIRING` | Enterprise app token-signing cert near expiry | Create a **new inactive** cert, send metadata to the SP owner. Activating it breaks the SP until they update | L2 |
+| `SECRET_EXPIRED_IN_USE` | SP sign-in failures from an expired credential | Page owner with evidence | L1 |
+| `PROVISIONING_QUARANTINED` | SCIM provisioning job quarantined / failing | Restart the job via Graph once the cause is cleared | L3 |
+| `ORPHANED_APP` | No owners, or all owners disabled | Assign a fallback owner group | L3 |
+
+```kql
+// Rotation check: which credential key ID each SP is actually using.
+// Safe to remove an old secret only after N days with zero sign-ins on its key ID.
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(14d)
+| summarize last_used = max(TimeGenerated), sign_ins = count()
+          by AppId, ServicePrincipalName, ServicePrincipalCredentialKeyId
+| order by AppId asc, last_used desc
+```
+
+**Verification:** sign-ins have moved to the new key ID; provisioning job state is healthy and
+the next cycle completes; SAML SP owner confirms the new cert before activation.
+
+### Track B — app abuse
+
+```kql
+// High-signal app changes: credentials, consent, permissions, owners, redirect URIs
+AuditLogs
+| where TimeGenerated > ago(1h)
+| where OperationName has_any ("Certificates and secrets management",
+                               "Add service principal credentials",
+                               "Consent to application",
+                               "Add delegated permission grant",
+                               "Add app role assignment to service principal",
+                               "Add owner to application",
+                               "Add owner to service principal",
+                               "Update application")
+| project TimeGenerated, OperationName, Result,
+          actor = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                           tostring(InitiatedBy.app.displayName)),
+          target = tostring(TargetResources[0].displayName),
+          target_id = tostring(TargetResources[0].id),
+          changes = TargetResources[0].modifiedProperties
+```
+
+| Symptom | Condition | Typical attack |
+|---|---|---|
+| `PRIVILEGED_APP_NEW_CREDENTIAL` | Credential added to an app holding high-privilege permissions or a directory role, by a non-owner or outside a change | Persistence / escalation (Midnight Blizzard pattern) |
+| `ILLICIT_CONSENT` | User consent to an unverified multi-tenant app requesting mail / files scopes + `offline_access` | Consent phishing |
+| `HIGH_PRIV_GRANT` | `RoleManagement.ReadWrite.Directory`, `AppRoleAssignment.ReadWrite.All`, `Application.ReadWrite.All`, `Mail.ReadWrite` granted, or a directory role assigned to an SP | Privilege escalation |
+| `REDIRECT_URI_RISK` | Wildcard, `http://`, or unowned / dangling domain added | Token theft / subdomain takeover |
+| `PRIVILEGED_APP_OWNER_ADDED` | Owner added to a privileged app | Indirect control of the app's credentials |
+| `SAML_OPEN_ASSIGNMENT` | SAML enterprise app with *assignment required* off | Any user can obtain a token |
+| `SP_BEHAVIOR_ANOMALY` | SP signs in from new IP / country, or calls new Graph endpoints (`MicrosoftGraphActivityLogs`); risky workload identity (Workload ID Premium) | Stolen SP credential in use |
+
+### Action catalog
+
+| Action | Ceiling | Executor permission | Rationale |
+|---|---|---|---|
+| Revoke illicit delegated grant (delete `oauth2PermissionGrant`) + revoke the user's sessions | **L3** → L4 after track record | `DelegatedPermissionGrant.ReadWrite.All`, `User.RevokeSessions.All` | Reversible; affects one user |
+| Disable SP (`accountEnabled=false`) — suspicious, low-usage third-party app | L3 (L2 if business-critical) | Custom Entra role limited to disabling SPs (*verify available custom-role permissions*) | Reversible; stops all token issuance for every user of the app |
+| Remove credential just added to a privileged app, no matching change | L3 — **via approval-gated pipeline** | `Application.ReadWrite.All` (pipeline only) | Fast containment, but must not undo a legitimate rotation |
+| Remove high-privilege app role assignment | L2 — via pipeline | `AppRoleAssignment.ReadWrite.All` (pipeline only) | May break a real integration |
+| Fix redirect URIs, turn on *assignment required* | **L2 — PR only** | Pipeline | Configuration belongs in code |
+| Change tenant consent settings / admin consent workflow | L2 — PR only | Pipeline | Tenant-wide |
+| Rotate a secret into Key Vault for an app the agent owns | L3 | `Application.ReadWrite.OwnedBy` + Key Vault Secrets Officer on one vault | `OwnedBy` limits writes to apps that list the agent as owner |
+| Restart provisioning job | L3 | `Synchronization.ReadWrite.All` | Reversible |
+| Delete an app or SP | **L1** | — | App registrations soft-delete for 30 days; a deleted SP loses assignments and configuration |
+
+`DelegatedPermissionGrant.ReadWrite.All` can also *create* grants — restrict the executor's code
+path to delete calls and alert on any grant it creates.
+
+### Gates
+- **Blast radius:** distinct users and sign-ins for the SP over 30 days.
+- **Hard gate — critical-app allowlist:** first-party Microsoft apps and named business-critical
+  apps can never be disabled by the agent, at any confidence.
+- **Change correlation:** mandatory for every credential and permission action.
+- **Reversibility:** disable / grant revoke = fast; deletion = L1.
+
+### Verification
+- **Disable / grant revoke:** no new sign-ins for the SP (or user + app) after the action; the
+  grant no longer appears in Graph.
+- **Credential removal:** key ID absent from the app object and from SP sign-in logs since removal.
+- **Redirect URI / assignment fixes:** live app object matches the merged PR.
+
+---
+
+## 8. Recommended rollout
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| 1 | All five in **shadow mode** (detect + propose + audit, no execution) | 30 days of proposals reviewed; false-positive rate measured per symptom |
-| 2 | APIM revision rollback + backend failover at L3; ADCS CRL republish at L3 | 10 approved executions, zero bad outcomes |
-| 3 | Foundry failover at L3; AD privileged-group removal and ADCS certificate hold at L3 via JEA | Same bar per action |
+| 1 | All six in **shadow mode** (detect + propose + audit, no execution) | 30 days of proposals reviewed; false-positive rate measured per symptom |
+| 2 | APIM revision rollback + backend failover at L3; ADCS CRL republish at L3; app secret-expiry notices at L2 | 10 approved executions, zero bad outcomes |
+| 3 | Foundry failover at L3; AD privileged-group removal and ADCS certificate hold at L3 via JEA; illicit-consent grant revoke at L3 | Same bar per action |
 | 4 | Promote individual actions to L4 where history supports it | Per-action H (historical match) ≥ 0.85 from audit data |
 | — | Conditional Access stays at L1–L2 (PR-based) permanently | — |
 
 The audit log from phase 1 is the training data for the H component of the confidence formula —
 the same role `apo_audit.jsonl` plays in Lab 2.
 
-## 8. Open questions
+## 9. Open questions
 - Which change-management system is authoritative for the change-correlation gate?
 - Is a Tier 0 host available to run the JEA endpoint, or does AD action stay at L1–L2 until one is?
 - Is Foundry traffic already fronted by APIM? (Use cases 1 and 2 share failover actions if so.)
 - Retention and immutability requirements for the audit table.
 - Is CA auditing (`AuditFilter 127`) already enabled and forwarded to Sentinel on every issuing CA?
 - Are DCs in full enforcement for strong certificate mapping (KB5014754)?
+- Is Workload ID Premium licensed (risky workload identities, CA for workload identities)?
+- Which apps go on the critical-app allowlist, and who owns that list?
+- Are `AADServicePrincipalSignInLogs` and `MicrosoftGraphActivityLogs` already sent to the Sentinel workspace?
