@@ -260,6 +260,13 @@ class VerificationLoop:
         )
         start = time.monotonic()
         polls, p90 = 0, None
+        # Settle first: the [1m] rate window must hold only post-restart samples, or
+        # the first poll measures pre-restart traffic and "recovers" in 0 s (seen in a
+        # real fault run). Window (60 s) + one scrape interval (15 s, prometheus-config.yaml).
+        # Counts toward the 120 s timeout, so elapsed_seconds stays a true MTTR.
+        settle_seconds = 60 + 15
+        print(f"  waiting {settle_seconds}s for post-restart metrics …")
+        time.sleep(settle_seconds)
         while time.monotonic() - start < self.timeout:
             p90 = self.client.query(promql)
             polls += 1
