@@ -108,7 +108,7 @@ metrics = await loop.run_in_executor(
 
 `run_in_executor` is necessary because `MetricsReader.read()` uses the synchronous `requests` library. Calling it directly inside an async function would freeze the event loop and negate the benefit of concurrent fan-out.
 
-> **🤖 Claude in production:** MetricsAgent IS a Claude LLM call in a real APO system — Claude receives the raw metrics dict and returns a structured `AgentFinding` by reasoning about what the numbers mean together. High memory AND elevated restarts AND stale scrape is a different prognosis than any one of those in isolation.
+> **🤖 Claude in production:** A specialist like MetricsAgent can be backed by a model such as Claude. It receives the raw metrics dict and proposes a symptom class by reasoning about what the numbers mean together: high memory AND elevated restarts AND stale scrape is a different prognosis than any one of those alone. The finding's confidence is still computed in code from evidence that can be checked, and arbitration and gates stay deterministic. The take-home `llm_logs_agent.py` shows this pattern for logs.
 
 ---
 

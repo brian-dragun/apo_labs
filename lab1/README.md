@@ -82,7 +82,7 @@ Safety gates are binary pass/fail checks that run before any action is committed
 | Reversibility | Actions that take longer to undo than your incident SLO | 600 s reversal time |
 | Time | Changes during peak traffic hours | Block 08:00–10:00 UTC |
 
-> **🤖 Claude in production:** The thresholds in `GateConfig` are lab constants. In a live system, Claude would derive these from historical incident data — calculating the blast-radius limit from past remediations and the cost ceiling from approved budget. The gate code stays deterministic; Claude tunes the numbers.
+> **🤖 Claude in production:** The thresholds in `GateConfig` are lab constants. In a live system they come from your incident history and approved budgets. A model such as Claude can help with the analysis, for example by proposing a blast-radius limit from past remediations, but a human reviews and commits every threshold. Gates define what is allowed, so neither the gate code nor its numbers are set by a model.
 
 Test your gates:
 
@@ -136,7 +136,7 @@ The composite score drives the autonomy level:
 | ≥ 0.60 | L2 | Suggests action |
 | < 0.60 | L1 | Escalates to human |
 
-> **🤖 Claude in production:** `detect_symptom_class()` and `ConfidenceScorer` are your stand-in for a Claude API call. In production, Claude receives the raw `metrics` dict and returns `(symptom_class, action_id, confidence_score)` using reasoning over the full picture — catching compound failures (high latency AND elevated restarts AND stale scrape) that a linear rule table misses.
+> **🤖 Claude in production:** `detect_symptom_class()` is the part a model can usefully help with. Given the raw `metrics` dict, a model such as Claude can propose a symptom class by reasoning over the full picture, catching compound failures (high latency AND elevated restarts AND stale scrape) that a linear rule table misses. `ConfidenceScorer` stays in code. Confidence comes from evidence you can verify, never from the model's own estimate, and the action comes from the catalog, never from the model. Lab 3's take-home shows this pattern.
 
 ### C. `PrometheusClient.query()` and `MetricsReader.read()` *(OPTIONAL — real cluster only)*
 

@@ -82,7 +82,7 @@ COMMANDS = {
 
 The `dry_run` flag lets you test the full decision path without restarting any pods — useful for validating gate logic during an incident.
 
-> **🤖 Claude in production:** Claude selects the execution method based on the target — a Kubernetes workload gets kubectl, a VM-based service gets an Ansible playbook, a managed cloud service gets an API call. The `ActionExecutor` abstraction maps to this.
+> **In production:** The execution method is fixed per catalog entry: a Kubernetes workload gets kubectl, a VM-based service gets an Ansible playbook, a managed cloud service gets an API call. The `ActionExecutor` abstraction maps to this. No model chooses how a command runs; the reviewed catalog entry already says.
 
 Test:
 
@@ -146,7 +146,7 @@ return {"recovered": False, "final_p90_ms": p90, "threshold_ms": threshold_ms,
         "elapsed_seconds": time.monotonic() - start, "polls": polls}
 ```
 
-> **🤖 Claude in production:** Claude would derive the 1.5× threshold dynamically from the deployment's historical p90 distribution — tight enough to catch a failed recovery, not so tight it false-positives on normal traffic jitter.
+> **In production:** Derive the 1.5× threshold from the deployment's historical P90 distribution, tight enough to catch a failed recovery but not so tight that normal traffic jitter registers as a failure. That's a statistics job, done in code and reviewed by a human, not a judgment left to a model.
 
 ---
 
