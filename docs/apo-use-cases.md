@@ -1,7 +1,9 @@
 # APO Beyond Kubernetes — Six Enterprise Use Cases
 
 **Status:** Design proposal (not implemented) · **Author:** Brian Dragun · **Date:** 2026-11-20
-**Builds on:** Labs 1–2 (`lab1/gate_starter.py`, `lab1/diagnostic_agent_starter.py`, `lab2/autonomous_agent_starter.py`)
+**Builds on:** Labs 1–3 (`lab1/gate_starter.py`, `lab1/diagnostic_agent_starter.py`, `lab2/autonomous_agent_starter.py`, `lab3/orchestrator_starter.py`)
+**Aligned with:** workshop deck `docs/Workshop-Slides.pdf` (Modules 1–8). Where the deck gives
+two different numbers, this document uses the stricter one and says so.
 
 The lab loop — **detect → diagnose → gate → execute → verify → audit** — does not depend on
 Kubernetes. This document maps it onto six platforms and sets an autonomy ceiling for each,
@@ -9,7 +11,7 @@ based on blast radius, reversibility, and what a compromised agent identity coul
 
 | # | Use case | Fit | Autonomy ceiling | First deliverable |
 |---|---|---|---|---|
-| 1 | Azure API Management (APIM) | Strong — closest to the lab | L3–L4 | Revision rollback + scale-out responder |
+| 1 | Azure API Management (APIM) | Strong — closest to the lab | L3–L4 | Revision rollback + backend failover responder |
 | 2 | Azure AI Foundry / Azure OpenAI | Strong — cost gate matters | L2–L4 by action | Throttling failover via APIM backend pool |
 | 3 | Entra ID Conditional Access | Detection only | **L1–L2** | Policy-change impact + drift detector |
 | 4 | On-prem AD tiering model | Strong detection, narrow action | L1–L3 by tier | Privileged-group drift responder |
@@ -32,27 +34,190 @@ What changes from the lab, for every use case:
 | `ConfidenceScorer` | S hardcoded to memory | S = clarity of the signal that *defines* the symptom; H/R/F unchanged |
 | `action_catalog.yaml` | kubectl actions | Per-platform catalog; same fields (`risk_class`, `blast_radius_max`, `reversal_time_seconds`, `required_confidence`, `max_executions_per_hour`, `cooldown_seconds`) plus `max_autonomy_level` |
 | `ActionExecutor` | `kubectl` subprocess | Azure SDK / REST, Bicep redeploy, or PowerShell behind a JEA endpoint |
-| Gates | cost, % pods, reversal time, peak hours | Same four, re-expressed per platform, plus a **change-correlation gate** (below) |
-| `VerificationLoop` | P90 < 1.5× baseline | Per-action post-condition (sections below) |
-| `AuditLogger` | local JSONL | Log Analytics custom table → Sentinel; written by an identity separate from the executor |
+| Gates | cost, % pods, reversal time, peak hours | Same four, re-expressed per platform; the time gate also covers change correlation and open incidents (§1.3) |
+| `VerificationLoop` | P90 < 1.5× baseline | Per-class "healthy" condition from the catalog, 3 healthy polls in a row (§1.7) |
+| `AuditLogger` | local JSONL | Log Analytics custom table → Sentinel; written by an identity separate from the executor (§1.8) |
+| `Orchestrator` (Lab 3) | MetricsAgent + LogsAgent, asyncio | Same rules; agents read KQL tables instead of PromQL and pod logs (§1.6) |
 
-### New gate common to all use cases: change correlation
+### 1.1 Autonomy levels and the level rule
 
-Block any action on a resource that has an **approved, in-window change** in ServiceNow / Azure
-DevOps. Without it, the agent "remediates" legitimate admin work. The gate fails closed: if the
-change system is unreachable, the action is blocked.
+| Level | Course name | What APO does | Human role |
+|---|---|---|---|
+| L1 | Manual | Nothing — humans are paged as before | Does everything |
+| L2 | Assisted | Diagnoses and recommends (or opens a PR) | Decides and executes |
+| L3 | Supervised | Executes **after** approval | Approves each action |
+| L4 | Active | Executes, then notifies; 60-second review window | Reviews, can undo |
+| L5 | Mature | Full autonomy for the class; quarterly review | Audits |
 
-### Autonomy ceiling per catalog entry
+**Level rule:** the effective level is the **lowest** of three values:
 
-The lab maps confidence to autonomy (C ≥ 0.80 → L4). Here each catalog entry also carries
-`max_autonomy_level`; the effective level is `min(level_from_confidence, max_autonomy_level)`.
-High confidence can never lift a dangerous action above its ceiling.
+```
+effective_level = min(level_from_confidence,      # lab: C ≥ 0.80 → L4
+                      max_autonomy_level,          # catalog: the action's risk target
+                      org_ceiling)                 # current rollout phase (§8.4)
+```
 
-### Agent identity (all use cases)
+High confidence can never lift a dangerous action above its ceiling, and no action can run above
+the phase the organization has reached. L5 is out of scope for every use case in this document.
+
+### 1.2 Trigger: what starts an incident
+
+APO consumes **correlated** input; it does not do raw-event correlation itself (that is the AIOps
+layer). It starts from one of two places:
+
+| Source | Use cases | Notes |
+|---|---|---|
+| **SLO burn-rate alert** (Azure Monitor scheduled-query alert) | APIM, Foundry | Fast burn: 14.4× budget over 5 min · slow burn: 2× over 1 h. Fire *before* the SLO is breached |
+| **Sentinel incident** (analytics rule → automation rule) | CA, AD, AD CS, Entra apps | Sentinel has already grouped related alerts; APO never acts on a single raw event |
+
+Every alert APO receives carries the same contract, or APO escalates without diagnosing:
+
+```json
+{ "incident_id": "INC-…", "service": "apim-prod-eus", "environment": "prod",
+  "apo_class": "latency", "severity": "P1",
+  "current": "P90 2.4 s", "baseline": "P90 0.6 s", "duration": "6 min" }
+```
+
+- **Severity:** P1 act now · P2 act within 15 min · P3 inform only (never executes).
+- **Scope:** one incident, one service. Downstream symptoms are suppressed (alert processing rules
+  in Azure Monitor, incident grouping in Sentinel), never "everything is broken".
+- **Telemetry is untrusted input.** An attacker who can write logs can try to *trigger* an action
+  (for example, forging events so APO disables a legitimate admin). Validate the alert against its
+  source table before diagnosing, and keep any learning component away from the gates.
+
+### 1.3 Gates
+
+The four course gates, with production defaults and per-environment thresholds:
+
+| Gate | Prod default | Dev / test | Notes |
+|---|---|---|---|
+| Confidence floor (`required_confidence`) | **0.85** | 0.60 | Per catalog entry; may be higher, never lower than the environment floor |
+| Cost | $1,000 / hour | higher | Anything that commits spend (PTU, APIM units) is capped at L2 regardless |
+| Blast radius | **≤ 5 %** of the service's users / traffic / objects | higher | Definition per use case below |
+| Reversibility | undo ≤ **300 s** | higher | Uses the action's reversibility class (below) |
+| Time | freeze windows, month-end close, **approved change in progress**, **correlated incident already open** | — | Change correlation and open-incident checks live here |
+
+**Time gate detail.** Block when the target resource has an approved, in-window change in
+ServiceNow / Azure DevOps (otherwise the agent "remediates" legitimate admin work), or when another
+open incident already touches the same resource (two responders fighting). The gate **fails
+closed**: if the change system or Sentinel is unreachable, the action is blocked.
+
+**Reversibility classes** — every catalog entry declares one:
+
+| Class | Meaning | Maximum level |
+|---|---|---|
+| `IMMEDIATE` | Undo ≤ 300 s with a known `reversal_command` | L4 |
+| `DELAYED` | Undo possible but > 300 s (scale-in, re-deploy, re-replication) | Blocked by the prod reversibility gate → L2 recommend only |
+| `IRREVERSIBLE` | No undo (password reset, permanent revocation, deletion, key operations) | **L1** — never executed by APO |
+
+**Hard gates** are code checks no confidence can override (break-glass exclusions, critical-app
+allowlist, revocation reason code 6 only, approved failover regions). They run before the four gates.
+
+### 1.4 Catalog fields
+
+Each entry carries the lab fields (`risk_class`, `blast_radius_max`, `reversal_time_seconds`,
+`required_confidence`, `max_executions_per_hour`, `cooldown_seconds`) plus:
+
+| Field | Purpose |
+|---|---|
+| `display_name` | What humans see in approvals and change records |
+| `reversibility_class` | `IMMEDIATE` / `DELAYED` / `IRREVERSIBLE` (§1.3) |
+| `reversal_command` | The tested undo; required for `IMMEDIATE` |
+| `allowed_environments` | e.g. `[dev, test]` until the action earns prod |
+| `max_autonomy_level` | The action's risk target (§1.1) |
+| `healthy_condition` | What "recovered" means for this class (§1.7) |
+| `enabled` | Per-class kill switch (§8.2) |
+
+**Stale-catalog check (monthly):** re-run every `reversal_command` in non-prod and compare the
+measured undo time with `reversal_time_seconds`. An entry that drifts past 300 s drops to `DELAYED`.
+
+Action selection follows the course: symptom class → catalog candidates → drop those below the
+confidence floor → drop those not allowed in this environment → the remaining action goes to the gates.
+
+### 1.5 Confidence in production
+
+`C = 0.35·S + 0.25·H + 0.25·R + 0.15·F` as in the labs, with the production definitions:
+
+| Component | Lab | Production |
+|---|---|---|
+| S — signal strength | Hard-coded from memory | z-score of the defining signal vs baseline: `min(1, z / 3)` |
+| H — history | Constant | `verified_recoveries / executions` for this class over 90 days, exponential decay, **minimum 20 executions** (below that, H = 0) |
+| R — reversibility | From catalog | Unchanged |
+| F — freshness | Last scrape age | Log Analytics ingestion lag for the source table |
+
+**Calibration:** expected calibration error (ECE) < 0.05, recalculated monthly from the audit
+table. If C says 0.90, about 90 % of those actions must actually verify.
+
+**Limitation for the security use cases:** H needs 20+ executions and promotion needs 100+
+occurrences (§8.4). Tier 0 group additions, ESC1 issuance and illicit consent are — hopefully —
+rare, so these classes may never accumulate the history for L4. Plan for them to stay at L3
+(approval) permanently; that is the design working, not a gap.
+
+### 1.6 Diagnosis agents
+
+- **Timeouts:** 50 ms per agent in simulate mode, 10 s against real systems (Lab 3); model
+  inference, if an LLM agent is added, 5 s. On timeout or error the finding is marked timed out,
+  never guessed.
+- **Quorum:** if fewer than 2 of 3 agents return a finding, escalate.
+- **Arbitration:** the five Lab 3 rules, in order (timeout → contradiction / corroboration →
+  cascade → weighted consensus). If the arbitrated confidence is **below 0.85, do not act:
+  escalate with every agent's finding attached**.
+- **Two `UNKNOWN` findings must not corroborate each other.** The Lab 3 rule as written adds +0.10
+  when both agents return `UNKNOWN`; production code only applies the bonus to a known class.
+- **Circuit breaker:** an agent that fails 3 times in 5 minutes is disabled and alerts. Core agents
+  run with 2+ replicas.
+- **Messages** (`DiagnosisRequest`, `DiagnosisResponse`, `ActionProposal`, `GateResult`,
+  `ExecutionResult`) all carry `incident_id`, so one incident can be traced end to end.
+
+### 1.7 Verification standard
+
+Applies to every "Verification" section below unless it says otherwise:
+
+- Poll the class's `healthy_condition`. **Recovered = 3 healthy polls in a row**; one healthy poll
+  followed by a bad one resets the count.
+- Course default: poll every 5 s, 300 s timeout. Log Analytics sources have minutes of ingestion
+  lag, so here: wait one ingestion window, poll every 30 s, 10-minute timeout.
+- No streak by the timeout → outcome `ESCALATED`, page a human with the audit record.
+- Outcomes are one of `RECOVERED`, `GATE_BLOCKED`, `ESCALATED`, `EXECUTION_FAILED` (as in Lab 2).
+
+### 1.8 Audit record and retention
+
+One record per decision, written **before** the switch check (§8.2) so nothing is lost in any mode:
+
+| Field | Content |
+|---|---|
+| `decision_id`, `incident_id` | Unique per decision; incident links the whole chain |
+| `timestamp` | Millisecond precision, UTC |
+| `agent_id` | Which agent(s) and versions produced the diagnosis |
+| `telemetry_snapshot` + `snapshot_sha256` | Exactly what the agent saw, with a hash to prove it was not altered |
+| `scores` | S, H, R, F, C and every arbitration rule applied |
+| `gate_result` | Approved, checks, `blocked_by`, reasons |
+| `approver` | Human (L3) or gate-config owner (L4) |
+| `execution`, `verification`, `outcome` | Command, exit code, stdout/stderr, poll history |
+
+- **Where:** Log Analytics custom table → Sentinel, mapped to OCSF, written by an identity the
+  executor cannot use.
+- **Retention:** 7 years, immutable (Log Analytics archive tier or an immutable storage export).
+- **Control mapping:** SOC 2 CC6.1 (logical access), CC7.2 (monitoring), CC8.1 (change
+  management); ISO 27001 A.12.4 (logging), A.14.2 (change control) — 2013 numbering, as on the slide; the 2022
+revision moves these to Annex A 8.15 and 8.32. *Confirm the mapping with
+  compliance before relying on it.*
+- **Sensitive data:** no secrets, tokens or personal data beyond the identifiers needed for the
+  decision (UPN, object ID).
+
+### 1.9 Agent identity (all use cases)
 
 - Managed identity / gMSA per agent **and per tier** — never a shared admin account.
 - Detection identity: read-only. Execution identity: only the rights its catalog needs.
 - Execution credentials never leave the tier they control (see §5).
+
+### 1.10 What to expect
+
+APO removes the human response time, not the platform's recovery time. The course's own
+measurements are about 35–115 s end to end (decision in well under a second, the rest is the
+platform restarting, scaling or rolling back). For the Azure and AD platforms here, with Log
+Analytics ingestion lag and replication, expect **minutes rather than hours** — not "zero MTTR".
+Measure the human MTTR per class before enabling APO, or there is nothing to compare against.
 
 ---
 
@@ -92,37 +257,55 @@ Plus the `Capacity` platform metric (Azure Monitor) for gateway saturation.
 ```yaml
 actions:
   - action_id: apim.revision_rollback
+    display_name: Roll back APIM API revision
     risk_class: low
     executor: azure_rest            # make the previous revision current
+    reversibility_class: IMMEDIATE
+    reversal_command: make the rolled-back revision current again
     reversal_time_seconds: 60
-    required_confidence: 0.80
+    required_confidence: 0.85
     max_autonomy_level: L4
+    allowed_environments: [dev, test, prod]
+    healthy_condition: error_rate < 0.01
     cooldown_seconds: 900
   - action_id: apim.scale_out
+    display_name: Add one APIM unit
     risk_class: medium
-    executor: azure_rest            # +1 unit
+    executor: none                  # recommend only in prod (see note)
     estimated_cost_per_hour_usd: <from SKU price>
-    reversal_time_seconds: 1800     # scale-in takes time
-    required_confidence: 0.80
-    max_autonomy_level: L3          # adds spend → human approves
+    reversibility_class: DELAYED    # scale-in takes ~30 min
+    reversal_time_seconds: 1800
+    required_confidence: 0.85
+    max_autonomy_level: L2          # fails the 300 s prod reversibility gate; also adds spend
+    allowed_environments: [dev, test, prod]
+    healthy_condition: Capacity < 70%
   - action_id: apim.backend_failover
+    display_name: Fail over APIM backend pool
     risk_class: medium
     executor: azure_rest            # switch backend pool / trip circuit breaker
+    reversibility_class: IMMEDIATE
+    reversal_command: restore original backend pool weights
     reversal_time_seconds: 120
     required_confidence: 0.85
     max_autonomy_level: L4
+    allowed_environments: [dev, test, prod]
+    healthy_condition: error_rate < 0.01 and p90_ms < 1.5 × baseline
 ```
+
+> **Scale-out cannot be autonomous in prod.** Its undo (scale-in) takes about 30 minutes, which
+> fails the 300 s reversibility gate at any confidence. APO recommends it with the evidence; a
+> human approves and runs it. Autoscale rules on the APIM instance are the better fix.
 
 ### Gates
 - **Cost:** scale-out unit price vs hourly budget.
-- **Blast radius:** % of total gateway traffic served by the affected APIs.
-- **Reversibility:** catalog `reversal_time_seconds` vs SLO.
-- **Time:** block during business-critical windows; change-correlation gate always on.
+- **Blast radius:** % of total gateway traffic served by the affected APIs (≤ 5 % in prod).
+- **Reversibility:** catalog reversibility class (§1.3).
+- **Time:** freeze and business-critical windows, approved APIM changes in progress, open
+  incidents on the same instance.
 
 ### Verification
-Re-run the KQL above every 30 s for up to 10 min; recovered when `error_rate < 0.01` and
-`p90_ms < 1.5 × baseline`. Ingestion latency is minutes, not seconds — wait one ingestion
-window before the first poll (same lesson as Lab 2's settle delay).
+Standard (§1.7) on the KQL above: healthy when `error_rate < 0.01` and `p90_ms < 1.5 × baseline`.
+Wait one ingestion window before the first poll (same lesson as Lab 2's settle delay).
 
 ### Identity
 Managed identity with **API Management Service Contributor scoped to the one APIM instance** —
@@ -156,23 +339,31 @@ degradation, without uncontrolled spend.
 actions:
   - action_id: aoai.failover_secondary
     executor: azure_rest            # shift APIM backend pool weight to secondary deployment
+    reversibility_class: IMMEDIATE
     reversal_time_seconds: 120
-    required_confidence: 0.80
+    required_confidence: 0.85
     max_autonomy_level: L4
   - action_id: aoai.rebalance_tpm
     executor: azure_rest            # move TPM between deployments in the same quota pool
+    reversibility_class: IMMEDIATE  # exactly at the 300 s limit — re-measure monthly (§1.4)
     reversal_time_seconds: 300
     required_confidence: 0.85
     max_autonomy_level: L3
   - action_id: aoai.version_rollback
-    executor: azure_rest
+    executor: none                  # recommend only in prod
+    reversibility_class: DELAYED    # re-deploying the newer version takes ~10 min
     reversal_time_seconds: 600
     required_confidence: 0.85
-    max_autonomy_level: L3
+    max_autonomy_level: L2          # fails the 300 s prod reversibility gate
+    allowed_environments: [dev, test, prod]
   - action_id: aoai.add_ptu
     executor: none                  # recommendation only — commits significant spend
     max_autonomy_level: L2
 ```
+
+> A model version rollback can still be the right fix. In prod it is a recommendation with
+> evidence; in dev/test (looser reversibility gate) it can run at L3. Prefer failing over to a
+> secondary deployment pinned to the previous version — that path is `IMMEDIATE`.
 
 ### Gates
 - **Cost gate is the main control.** PTU is a large commitment; anything that adds spend is capped at L2.
@@ -181,8 +372,9 @@ actions:
   not a confidence input.
 
 ### Verification
-429 and 5xx rates back under threshold on the serving deployment; latency within 1.5× baseline;
-secondary deployment healthy under the shifted load.
+Standard (§1.7). Healthy when 429 and 5xx rates are back under threshold on the serving
+deployment, latency is within 1.5× baseline, and the secondary deployment is healthy under the
+shifted load.
 
 ---
 
@@ -300,11 +492,15 @@ paths from BloodHound / PingCastle runs.
 ### Gates
 - **Blast radius = tier + object count.** Tier 0 objects always need higher `required_confidence`.
 - **Reversibility** from catalog: disable / group removal fast; password reset infinite.
-- **Change correlation** with ServiceNow / ADO — mandatory for Tier 0.
+- **Time gate** (§1.3) — the change-correlation check is mandatory for Tier 0; a PAM-approved
+  elevation counts as an approved change.
+- **Trigger** is a Sentinel incident (Defender for Identity + analytics rules), never a single
+  raw 4728 event — forged or replayed events are an attack on the agent itself (§1.2).
 
 ### Verification
 Re-query the object on **every DC** and confirm replication converged
 (`Get-ADReplicationAttributeMetadata`). A fix on one DC that has not replicated is not a fix.
+"Healthy" for the 3-in-a-row rule (§1.7) means every DC agrees on that poll.
 
 ### Audit
 Sentinel custom table, written by an identity different from the executor, so the agent cannot
@@ -401,7 +597,8 @@ enforcement) — otherwise a forged or stolen certificate can still be mapped we
 ### Gates
 - **Blast radius:** number of enrollees / services depending on the template or CA affected.
 - **Reversibility:** hold = reversible; any other revocation = infinite → L1.
-- **Change correlation:** template edits and CRL maintenance usually run in change windows — mandatory.
+- **Time gate (§1.3):** template edits and CRL maintenance usually run in change windows — the
+  change-correlation check is mandatory.
 - **Hard gate in code:** the containment role may only use reason code 6; any other reason is rejected
   before the executor is called.
 
@@ -512,7 +709,8 @@ path to delete calls and alert on any grant it creates.
 - **Blast radius:** distinct users and sign-ins for the SP over 30 days.
 - **Hard gate — critical-app allowlist:** first-party Microsoft apps and named business-critical
   apps can never be disabled by the agent, at any confidence.
-- **Change correlation:** mandatory for every credential and permission action.
+- **Time gate (§1.3):** the change-correlation check is mandatory for every credential and
+  permission action.
 - **Reversibility:** disable / grant revoke = fast; deletion = L1.
 
 ### Verification
@@ -530,11 +728,13 @@ to the Azure and on-prem platforms in this document.
 
 ### 8.1 What must exist before Phase 1 (shadow mode)
 
-Build from the bottom up — each layer depends on the one beneath it. Phase 1 starts only when
-every layer is in place for the use cases in scope.
+Build from layer 0 up — each layer depends on the one beneath it. Phase 1 starts only when
+every layer is in place for the use cases in scope. If layer 0 fails (no tested runbook, fix not
+callable by API), the use case is not ready for APO, however good the detection is.
 
 | # | Course layer | Equivalent here | Per use case |
 |---|---|---|---|
+| 0 | **Readiness** (course readiness tree) | Organizational, not technical | SLOs with burn-rate alerts for APIM / Foundry · top-10 runbooks per use case **tested within the last 90 days** · every catalog fix callable by API (Azure REST, Graph, PowerShell behind JEA — no portal-only steps) · an executive sponsor · on-call engineers who agreed which classes to automate |
 | 1 | **Prometheus** — RED metrics for every P0/P1 service | **Azure Monitor metrics + Log Analytics** | APIM gateway logs + `Capacity` · Foundry 429 / 5xx / token metrics · `SigninLogs`, `AuditLogs`, `AADServicePrincipalSignInLogs` · `SecurityEvent` from DCs and issuing CAs via Azure Monitor Agent · Defender for Identity |
 | 2 | **Log aggregation** — structured, central | **One Log Analytics workspace behind Sentinel** | All KQL in §2–§7 runs here; the APO audit table lives here |
 | 3 | **Alertmanager** — webhook entry point for APO | **Azure Monitor action groups + Sentinel automation rules** | Alert / analytics rule → webhook → APO runner (Function, Container App or Logic App) |
@@ -572,21 +772,89 @@ Reach for the narrowest switch that stops the problem.
 
 ### 8.4 Phases
 
-| Phase | Switch state | Scope | Exit criteria |
+Evidence gates every transition: never skip Phase 1, and do not advance on a date. The deck gives
+two agreement thresholds for leaving shadow mode (> 75 % in Module 8, > 90 % over 30 days in the
+Day 1 promotion criteria); this document uses **90 %**, because identity and PKI actions carry
+more risk than pod restarts.
+
+| Phase | Switch state (org ceiling) | Scope | Exit criteria |
 |---|---|---|---|
-| 0 | APO off | Build §8.1 layers 1–5; test every catalog action in non-prod | All five layers in place; every action passes in staging |
-| 1 | `ALL_GATES_BLOCK=true` | All six use cases in **shadow mode** (detect + propose + audit, no execution) | 30 days of proposals reviewed; false-positive rate measured per symptom |
-| 2 | Global block off; per-class flags on only for listed actions | APIM revision rollback + backend failover at L3; AD CS CRL republish at L3; app secret-expiry notices at L2 | 10 approved executions per action, zero bad outcomes |
-| 3 | Add classes one at a time | Foundry failover at L3; AD privileged-group removal and AD CS certificate hold at L3 via JEA; illicit-consent grant revoke at L3 | Same bar per action |
-| 4 | Unchanged | Promote individual actions to L4 where history supports it | Per-action H (historical match) ≥ 0.85 from audit data |
+| 0 | APO off (L1) | Build §8.1 layers 0–5; test every catalog action in non-prod | All layers in place; every action passes in staging |
+| 1 — Shadow, 4–12 weeks | `ALL_GATES_BLOCK=true` (L2) | All six use cases: detect + propose + audit, no execution. Engineers label every proposal daily | **≥ 50 incidents** per use case; agent–human agreement **> 90 % over 30 days**; **zero blast-radius violations** in proposals |
+| 2 — Supervised, 4–8 weeks | Global block off; per-class flags on only for listed actions (L3) | APIM revision rollback + backend failover; AD CS CRL republish; app secret-expiry notices (L2) | Per class: false positives **< 2 %**; **≥ 60 %** of in-scope incidents handled; 30-day success **> 95 %**; engineer approval |
+| 3 — Expand | Add classes one at a time (L3) | Foundry failover; AD privileged-group removal and AD CS certificate hold via JEA; illicit-consent grant revoke. Formal catalog review per class; monthly calibration review | Same bar per class |
+| 4 — Active | Promote individual classes (L4) | Only classes meeting the promotion criteria below | Quarterly calibration review and a rollback drill |
 | — | Global block permanent for CA | Conditional Access stays at L1–L2 (PR-based) | — |
+
+**Promotion criteria for a class (course trust signals)** — all must hold:
+
+| Signal | Threshold |
+|---|---|
+| Occurrences of the class | ≥ 100 |
+| Agent–human agreement in shadow / supervised | > 90 % over 30 days |
+| Gate violations | Zero in the last 100 runs |
+| Undo time | < 5 min, tested (`IMMEDIATE` class) |
+| Blast radius | ≤ 5 % |
+| Sign-off | Tech lead for the platform, recorded as a change |
+
+**Step back down** a level as soon as any signal slips (for example, approval rate below 85 % or
+a gate violation). **Gates tighten as scope expands; they never relax.**
 
 The audit log from Phase 1 is the training data for the H component of the confidence formula —
 the same role `apo_audit.jsonl` plays in Lab 2.
 
-> **Gap in the lab code:** the course labs implement none of the three switches. `GateOrchestrator`
-> has no global block and `action_catalog.yaml` has no `enabled` flag. Both are small additions:
-> a first gate that reads `ALL_GATES_BLOCK`, and a catalog lookup before a proposal is built.
+### 8.5 Governance and change control
+
+- **Every autonomous action is an ITSM change record** (ServiceNow / Azure DevOps): what changed,
+  approver (human at L3, gate-config owner at L4), outcome, link to the audit record.
+- **The CAB approves the gate configuration, not each action.** Catalog entries and gate
+  thresholds go through normal change control; actions inside them run as pre-approved changes
+  because the gates enforce the policy.
+- **Gate and catalog changes need two engineers and a 24-hour delay** before they take effect —
+  implemented as a protected branch with required reviewers and a scheduled deploy, so nobody
+  (and no agent) can loosen a gate during an incident.
+- **Explainable and reversible:** every decision can be explained from its audit record alone.
+- **Regulatory scope** (from the deck; applicability is a question for compliance — see §9):
+  EU DORA for financial entities (production changes logged with approver), HIPAA (no protected
+  health data in telemetry or audit), FedRAMP (isolated environment for agents), EU AI Act
+  Article 9 (risk assessment for autonomous actions).
+
+### 8.6 Observing APO itself
+
+APO needs its own dashboard (Azure Workbook or Grafana over the audit table):
+
+| Area | Metrics | Watch for |
+|---|---|---|
+| Decisions | decision rate, approval rate, gate block rate **per gate** | A gate that never blocks, or always does |
+| Quality | MTTR p50/p99 per class vs the human baseline; false-positive rate (actions that did not fix the incident); average C | Average C trending down = drift → recalibrate |
+| Agents | timeout rate, error rate, replica count, p99 latency | Rising timeouts before the circuit breaker opens |
+| Cost | action cost per hour; cost avoided (MTTR saved × engineer hourly cost × incidents) | Spend from recommended-only actions being approved by habit |
+| Security | switch flips, gate-config changes, unusual gate-bypass patterns, class changes | Forward to Sentinel; each is a potential incident |
+
+### 8.7 Success metrics and the human side
+
+| KPI | Target | Note |
+|---|---|---|
+| MTTR | 80 % reduction for in-scope classes within 6 months | Median, same class, before vs after |
+| Correct actions | > 90 % verify within 10 min | Per class, never aggregated; pause expansion below 85 % approval |
+| On-call toil | Measurably down within 12 months | Tracked in post-incident reviews |
+| Engineer trust | Monthly survey ("How confident are you in APO's decisions?") | Low trust → more shadow data, clearer decision logs, narrower scope |
+
+- Involve on-call engineers in gate design from day one and **never automate a class they have not
+  agreed to automate**.
+- Start with the classes the team finds most tedious (secret-expiry notices, CRL republish), not
+  the most impressive ones.
+- Share shadow-mode data weekly ("APO would have handled this one").
+- On-call engineers gain new work: labeling outcomes, tuning thresholds, approving scope
+  expansion. Plan time for it.
+
+> **Gaps in the lab code** (fine for a workshop, must change before production):
+> - None of the three switches exist. `GateOrchestrator` has no global block and
+>   `action_catalog.yaml` has no `enabled` flag — a first gate reading `ALL_GATES_BLOCK` and a
+>   catalog lookup before a proposal is built would cover both.
+> - Lab 2 declares recovery on the first healthy poll; production needs 3 in a row (§1.7).
+> - Lab 3 escalates only when *every* agent times out; production escalates below a 2-of-3
+>   quorum, below C = 0.85 after arbitration, and never lets two `UNKNOWN` findings corroborate (§1.6).
 
 ## 9. Open questions
 - Who holds authority to flip each of the three switches, and how fast can they be reached?
@@ -595,7 +863,11 @@ the same role `apo_audit.jsonl` plays in Lab 2.
 - Which change-management system is authoritative for the change-correlation gate?
 - Is a Tier 0 host available to run the JEA endpoint, or does AD action stay at L1–L2 until one is?
 - Is Foundry traffic already fronted by APIM? (Use cases 1 and 2 share failover actions if so.)
-- Retention and immutability requirements for the audit table.
+- Does the 7-year immutable retention (§1.8) match our records policy, and is the SOC 2 / ISO mapping accepted by compliance?
+- Which regulatory regimes in §8.5 actually apply (EU DORA via any EU entities, state insurance regulations such as NYDFS Part 500, HIPAA for any health data)?
+- Can ServiceNow accept APO actions as pre-approved changes with the gate-config owner as approver (§8.5)?
+- What is the measured human MTTR per class today? Without it, §8.7 has no baseline.
+- Who are the tech leads that sign off promotion for each platform (§8.4)?
 - Is CA auditing (`AuditFilter 127`) already enabled and forwarded to Sentinel on every issuing CA?
 - Are DCs in full enforcement for strong certificate mapping (KB5014754)?
 - Is Workload ID Premium licensed (risky workload identities, CA for workload identities)?
