@@ -106,6 +106,7 @@ stop_background() {
         rm -f "$PID_FILE"
     fi
     # Also clear forwards/generators started by hand in other terminals (they hold the ports)
+    pkill -f "^bash -c while true; do kubectl port-forward" 2>/dev/null || true   # reconnect loop first
     pkill -f "^kubectl port-forward .*(8080|9090)" 2>/dev/null || true
     pkill -f "^[^ ]*python[0-9.]* [^ ]*load_generator\.py" 2>/dev/null || true
     sleep 1
@@ -123,7 +124,10 @@ start_background() {
     info "Starting port-forwards and load generator in the background..."
     stop_background
     mkdir -p "$LOG_DIR"
-    nohup kubectl port-forward svc/payment-service 8080:80 >"$LOG_DIR/pf-payment.log" 2>&1 &
+    # kubectl binds a svc/ forward to ONE pod, so a rolling restart would kill it.
+    # The loop reconnects to the new pods whenever the forward exits.
+    nohup bash -c 'while true; do kubectl port-forward svc/payment-service 8080:80; sleep 1; done' \
+        >"$LOG_DIR/pf-payment.log" 2>&1 &
     echo $! >>"$PID_FILE"
     nohup kubectl port-forward -n monitoring svc/prometheus 9090:9090 >"$LOG_DIR/pf-prometheus.log" 2>&1 &
     echo $! >>"$PID_FILE"

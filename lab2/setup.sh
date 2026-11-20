@@ -51,9 +51,17 @@ sleep 1
 # ── Port-forwards ─────────────────────────────────────────────────────────────
 info "Starting port-forwards..."
 
-PAY_POD=$(kubectl get pod -l app=payment-service -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward "pod/$PAY_POD" 8080:8080 >/dev/null 2>&1 &
+# >>>>> MY CODE START — fix: keep 8080 alive across pod restarts
+#       The instructor's forward targeted one pod by name, so the agent's own
+#       pod.rolling_restart killed it (load generator + toggle_fault went dead).
+#       Forwarding svc/ alone doesn't help: kubectl still binds to one pod. This
+#       loop re-runs the forward whenever it exits, landing on the new pods.
+#       Instructor's original:
+#         PAY_POD=$(kubectl get pod -l app=payment-service -o jsonpath='{.items[0].metadata.name}')
+#         kubectl port-forward "pod/$PAY_POD" 8080:8080 >/dev/null 2>&1 &
+bash -c 'while true; do kubectl port-forward svc/payment-service 8080:80; sleep 1; done' >/dev/null 2>&1 &
 echo "$!" > "$PID_FILE"
+# <<<<< MY CODE END
 kubectl port-forward -n monitoring svc/prometheus 9090:9090 >/dev/null 2>&1 &
 echo "$!" >> "$PID_FILE"
 

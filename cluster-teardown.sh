@@ -34,6 +34,7 @@ stop_background() {
         rm -f "$PID_FILE"
     fi
     # Catch any started by hand in other terminals
+    pkill -f "^bash -c while true; do kubectl port-forward" 2>/dev/null || true   # reconnect loop first
     pkill -f "^kubectl port-forward .*(8080|9090)" 2>/dev/null || true
     pkill -f "^[^ ]*python[0-9.]* [^ ]*load_generator\.py" 2>/dev/null || true
     rm -rf "$LOG_DIR"
