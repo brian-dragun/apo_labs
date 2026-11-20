@@ -19,6 +19,14 @@ Run (real mode — requires k3d + Prometheus):
     python autonomous_agent_starter.py --prometheus-url http://localhost:9090
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO READ THIS FILE
+#   Code between  >>>>> MY CODE ... START  and  <<<<< MY CODE ... END  markers
+#   is what I wrote for the lab. Everything else is the instructor's original.
+#   Original copy:  git show workshop-original:lab2/autonomous_agent_starter.py
+#   See every change:  git diff workshop-original -- lab2/autonomous_agent_starter.py
+# ─────────────────────────────────────────────────────────────────────────────
+
 from __future__ import annotations
 import argparse
 import json
@@ -129,7 +137,50 @@ class ActionExecutor:
             ],
         }
         """
-        # TODO: implement this method
+        # >>>>> MY CODE START — Lab 2 Step 3: ActionExecutor.execute()
+        #       (replaced the instructor's "# TODO: implement this method" stub)
+        start       = time.monotonic()
+        executed_at = datetime.now(timezone.utc).isoformat()
+
+        def result(success: bool, output: str, error: str = "") -> dict:
+            # One place builds the 10-key dict, so all four exits return the same shape
+            return {
+                "action_id":   action_id,
+                "deployment":  deployment,
+                "namespace":   namespace,
+                "executed_at": executed_at,
+                "dry_run":     self.dry_run and not self.simulate,
+                "simulate":    self.simulate,
+                "success":     success,
+                "output":      output,
+                "error":       error,
+                "duration_ms": int((time.monotonic() - start) * 1000),
+            }
+
+        if self.simulate:
+            return result(True, f"[SIMULATE] {action_id} on deployment/{deployment} -n {namespace}")
+
+        COMMANDS = {
+            "pod.rolling_restart": ["kubectl", "rollout", "restart", f"deployment/{deployment}", "-n", namespace],
+            "db.connection_reset": ["kubectl", "rollout", "restart", f"deployment/{deployment}", "-n", namespace],
+            "config.rollback":     ["kubectl", "rollout", "undo",    f"deployment/{deployment}", "-n", namespace],
+        }
+        cmd = COMMANDS.get(action_id)
+        if cmd is None:
+            # Beyond the README spec: an unknown action fails cleanly instead of a KeyError
+            return result(False, "", f"no command mapped for action '{action_id}'")
+
+        if self.dry_run:
+            return result(True, "[DRY RUN] " + " ".join(cmd))
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            # Beyond the README spec: kubectl missing or hung → failed result, run still gets audited
+            return result(False, "", f"{type(exc).__name__}: {exc}")
+        return result(proc.returncode == 0, proc.stdout.strip(), proc.stderr.strip())
+        # <<<<< MY CODE END
+        # Instructor's original stub below never runs now (my code returns above).
         raise NotImplementedError("Implement ActionExecutor.execute()")
 
 
